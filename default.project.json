@@ -1,0 +1,30 @@
+{
+  "name": "Corredor da Mentira",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "$ignoreUnknownInstances": false,
+      "$path": "src/ReplicatedStorage"
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "$ignoreUnknownInstances": false,
+      "$path": "src/ServerScriptService"
+    },
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "$ignoreUnknownInstances": false,
+      "$path": "src/ServerStorage"
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$ignoreUnknownInstances": false,
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "$ignoreUnknownInstances": false,
+        "$path": "src/StarterPlayerScripts"
+      }
+    }
+  }
+}

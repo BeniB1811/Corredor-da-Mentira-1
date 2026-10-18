@@ -1,0 +1,20 @@
+# Temporary locks written while Roblox Studio has a place/model open.
+*.rbxl.lock
+*.rbxlx.lock
+*.rbxm.lock
+*.rbxmx.lock
+
+# Operating system and editor temporary files.
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.temp
+*.bak
+*.log
+
+# Local caches and generated Rojo output.
+node_modules/
+.wally_packages/
+.rojo/
+*.sourcemap.json
