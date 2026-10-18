@@ -76,6 +76,7 @@ local fimRodadaTimestamp = 0
 local inicioTentativaTimestamp: { [Player]: number } = {}
 local fimTentativaTimestamp: { [Player]: number } = {}
 local resetComRespawnPendente: { [Player]: boolean } = {}
+local tentativaManualPendenteInicio: { [Player]: boolean } = {}
 local tokenPreparacao = 0
 local participantes: { [Player]: boolean } = {}
 local tutorialConcluido: { [Player]: boolean } = {}
@@ -99,6 +100,20 @@ local function obterPontuacao(player: Player): number
 		return 0
 	end
 	return math.clamp(math.floor(valor), 0, QuizConfig.MAX_ACERTOS)
+end
+
+local function tentativaAprovadaCongelada(player: Player): boolean
+	return typeof(player:GetAttribute("TempoRestanteCongeladoQuiz")) == "number"
+		and obterPontuacao(player) >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
+end
+
+local function existeJogadorComTentativaDisponivel(): boolean
+	for _, player in ipairs(Players:GetPlayers()) do
+		if tutorialConcluido[player] == true and not tentativaAprovadaCongelada(player) then
+			return true
+		end
+	end
+	return false
 end
 
 local function atualizarLeaderstats(player: Player, pontos: number)
@@ -263,7 +278,7 @@ local function fecharPortasTentativa(player: Player)
 end
 
 local function resetarTentativa(player: Player, contarNovaTentativa: boolean?, inicioServidor: number?)
-	if contarNovaTentativa and fase == FASE_ATIVA and participantes[player] == true then
+	if contarNovaTentativa and tutorialConcluido[player] == true then
 		local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
 		player:SetAttribute("NumeroTentativaQuiz", tentativaAtual + 1)
 	end
@@ -271,6 +286,7 @@ local function resetarTentativa(player: Player, contarNovaTentativa: boolean?, i
 	decksQuestoes[player] = {}
 	player:SetAttribute("AcertosQuiz", 0)
 	player:SetAttribute("TempoConclusaoQuiz", nil)
+	player:SetAttribute("TempoRestanteCongeladoQuiz", nil)
 	if fase == FASE_ATIVA and participantes[player] == true then
 		local agoraServidor = inicioServidor or Workspace:GetServerTimeNow()
 		inicioTentativaTimestamp[player] = agoraServidor
@@ -318,7 +334,7 @@ local function tentarIniciarRodada()
 	if fase ~= FASE_TUTORIAL and fase ~= FASE_INTERVALO then
 		return
 	end
-	if not todosConcluiramTutorial() then
+	if not todosConcluiramTutorial() or not existeJogadorComTentativaDisponivel() then
 		return
 	end
 
@@ -535,6 +551,26 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 		atualizarLeaderstats(player, pontos)
 	end
 
+	if not sessao.Tutorial
+		and pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
+		and not tentativaAprovadaCongelada(player)
+	then
+		local agoraServidor = Workspace:GetServerTimeNow()
+		local inicioTentativa = inicioTentativaTimestamp[player]
+			or (tonumber(player:GetAttribute("InicioTentativaQuiz")) :: number?)
+			or inicioRodadaTimestamp
+		local fimTentativa = fimTentativaTimestamp[player]
+			or (tonumber(player:GetAttribute("FimTentativaQuiz")) :: number?)
+			or agoraServidor
+		player:SetAttribute("TempoConclusaoQuiz", math.max(0, agoraServidor - inicioTentativa))
+		player:SetAttribute("TempoRestanteCongeladoQuiz", math.max(0, fimTentativa - agoraServidor))
+		notificar(
+			player,
+			"Você alcançou 15 acertos. Os dois cronômetros e o tempo da leaderboard ficaram congelados até o reset.",
+			Color3.fromRGB(120, 235, 165)
+		)
+	end
+
 	ControlarPorta:FireClient(player, sessao.NomePorta, true)
 	local proximo = progresso[player]
 	if sessao.Tutorial then
@@ -671,7 +707,9 @@ local function configurarPortaoRecompensas()
 		end
 
 		local pontos = obterPontuacao(player)
-		if fase == FASE_ATIVA and participantes[player] == true and pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS then
+		if pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
+			and ((fase == FASE_ATIVA and participantes[player] == true) or tentativaAprovadaCongelada(player))
+		then
 			return
 		end
 
@@ -789,6 +827,7 @@ local function processarReset(player: Player, matarPersonagem: boolean)
 		return
 	end
 	ultimoReset[player] = agora
+	local iniciarTentativaNaProximaRodada = fase ~= FASE_ATIVA and tutorialConcluido[player] == true
 	if fase == FASE_ATIVA and tutorialConcluido[player] == true then
 		-- Reset após o prazo individual reabre uma nova tentativa enquanto a
 		-- sessão compartilhada ainda estiver ativa.
@@ -796,8 +835,14 @@ local function processarReset(player: Player, matarPersonagem: boolean)
 	end
 	local tentativaAntesDoReset = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
 	resetarTentativa(player, true)
+	if iniciarTentativaNaProximaRodada then
+		tentativaManualPendenteInicio[player] = true
+	end
 	local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or tentativaAntesDoReset
 	notificar(player, string.format("Rodada reiniciada. Acertos zerados; você começou a rodada %d.", tentativaAtual), Color3.fromRGB(255, 215, 100))
+	if fase == FASE_INTERVALO then
+		tentarIniciarRodada()
+	end
 	if matarPersonagem then
 		local humanoid = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 		if humanoid and humanoid.Health > 0 then
@@ -906,9 +951,11 @@ local function configurarPortais()
 						toquesDoJogador[source] = agora
 
 						local destinoRecompensas = destination:GetAttribute("IsRewardDestination") == true
-						if destinoRecompensas and (fase ~= FASE_ATIVA
-							or participantes[player] ~= true
-							or obterPontuacao(player) < QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS) then
+						local acessoCongelado = tentativaAprovadaCongelada(player)
+						local acessoNaTentativaAtiva = fase == FASE_ATIVA
+							and participantes[player] == true
+							and obterPontuacao(player) >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
+						if destinoRecompensas and not (acessoNaTentativaAtiva or acessoCongelado) then
 							notificar(player, string.format("A entrada exige 15 acertos na tentativa atual (%d/%d).", obterPontuacao(player), QuizConfig.MAX_ACERTOS), Color3.fromRGB(255, 100, 100))
 							return
 						end
@@ -933,13 +980,28 @@ iniciarRodada = function()
 	numeroRodada += 1
 	fase = FASE_ATIVA
 	inicioRodadaTimestamp = Workspace:GetServerTimeNow()
-	fimRodadaTimestamp = inicioRodadaTimestamp + QuizConfig.DURACAO_RODADA_SEGUNDOS
+	fimRodadaTimestamp = 0
+	local iniciouTentativa = false
 	for _, player in ipairs(Players:GetPlayers()) do
-		participantes[player] = true
-		player:SetAttribute("NumeroTentativaQuiz", 1)
-		resetarTentativa(player, false, inicioRodadaTimestamp)
-		progresso[player] = { Materia = "Geografia", Nivel = 1 }
-		teleportarParaNivel(player, "Geografia", 1)
+		if tentativaAprovadaCongelada(player) then
+			participantes[player] = false
+			sessoes[player] = nil
+		else
+			iniciouTentativa = true
+			participantes[player] = true
+			if not tentativaManualPendenteInicio[player] then
+				player:SetAttribute("NumeroTentativaQuiz", 1)
+			end
+			tentativaManualPendenteInicio[player] = nil
+			resetarTentativa(player, false, inicioRodadaTimestamp)
+			progresso[player] = { Materia = "Geografia", Nivel = 1 }
+			teleportarParaNivel(player, "Geografia", 1)
+		end
+	end
+	if not iniciouTentativa then
+		fase = FASE_INTERVALO
+		transmitirEstadoRodada()
+		return
 	end
 	transmitirEstadoRodada()
 
@@ -963,10 +1025,18 @@ iniciarRodada = function()
 						player:SetAttribute("InicioTentativaQuiz", nil)
 						sessoes[player] = nil
 						fecharPortasTentativa(player)
-						FimDeRodada:FireClient(player, {
-							Mensagem = "Seu tempo acabou. Aguarde o próximo início para tentar de novo.",
-							Individual = true,
-						})
+						if tentativaAprovadaCongelada(player) then
+							FimDeRodada:FireClient(player, {
+								Mensagem = "Tentativa congelada preservada. Use RESETAR para iniciar outra.",
+								Individual = true,
+								Concluida = true,
+							})
+						else
+							FimDeRodada:FireClient(player, {
+								Mensagem = "Seu tempo acabou. Aguarde o próximo início para tentar de novo.",
+								Individual = true,
+							})
+						end
 					end
 				end
 			end
@@ -1013,6 +1083,7 @@ local function inicializarJogador(player: Player)
 	player:SetAttribute("AcertosQuiz", 0)
 	player:SetAttribute("NumeroTentativaQuiz", 0)
 	player:SetAttribute("TempoConclusaoQuiz", nil)
+	player:SetAttribute("TempoRestanteCongeladoQuiz", nil)
 	player:SetAttribute("InicioTentativaQuiz", nil)
 	player:SetAttribute("FimTentativaQuiz", nil)
 	inicioTentativaTimestamp[player] = nil
@@ -1048,6 +1119,7 @@ local function removerJogador(player: Player)
 	inicioTentativaTimestamp[player] = nil
 	fimTentativaTimestamp[player] = nil
 	resetComRespawnPendente[player] = nil
+	tentativaManualPendenteInicio[player] = nil
 	progresso[player] = nil
 	sessoes[player] = nil
 	decksQuestoes[player] = nil

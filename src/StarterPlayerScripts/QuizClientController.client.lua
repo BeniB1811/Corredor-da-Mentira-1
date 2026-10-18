@@ -173,7 +173,32 @@ local resetScale = (reset:FindFirstChildOfClass("UIScale") or Instance.new("UISc
 resetScale.Scale = 1
 resetScale.Parent = reset
 
+local function formatarTempo(segundos: number): string
+	local totalMilissegundos = math.floor(math.max(0, segundos) * 1000 + 0.5)
+	local minutos = math.floor(totalMilissegundos / 60000)
+	local segundosRestantes = math.floor(totalMilissegundos / 1000) % 60
+	local milissegundos = totalMilissegundos % 1000
+	return string.format("%02d:%02d.%03d", minutos, segundosRestantes, milissegundos)
+end
+
+local function renderizarTempoCongelado(): boolean
+	local tempoCongelado = player:GetAttribute("TempoConclusaoQuiz")
+	local restanteCongelado = player:GetAttribute("TempoRestanteCongeladoQuiz")
+	if typeof(tempoCongelado) ~= "number" or typeof(restanteCongelado) ~= "number" then
+		return false
+	end
+	timerLabel.Text = formatarTempo(tempoCongelado)
+	timerLabel.TextColor3 = Color3.fromRGB(120, 235, 165)
+	local pontos = tonumber(player:GetAttribute("AcertosQuiz")) or 0
+	statusLabel.Text = string.format("%d/20  ·  TEMPO CONGELADO", pontos)
+	statusLabel.TextColor3 = Color3.fromRGB(120, 235, 165)
+	return true
+end
+
 local function aplicarEstadoRodada(dados: any)
+	if renderizarTempoCongelado() then
+		return
+	end
 	local fase = typeof(dados) == "table" and dados.Fase or "Tutorial"
 	if fase == "Ativa" and typeof(dados.FimRodadaTimestamp) == "number" then
 		timerLabel.Text = "00:00.000"
@@ -401,6 +426,12 @@ end
 
 FimDeRodada.OnClientEvent:Connect(function(dados: any)
 	fecharInterface()
+	if renderizarTempoCongelado() then
+		if typeof(dados) ~= "table" or dados.Individual ~= true then
+			faseAtual = "Intervalo"
+		end
+		return
+	end
 	if typeof(dados) == "table" and dados.Individual == true then
 		ultimoTextoPrazoRodada = ""
 		statusLabel.Text = tostring(dados.Mensagem or "Seu tempo acabou.")
@@ -420,20 +451,21 @@ RunService.Heartbeat:Connect(function()
 	if faseAtual ~= "Ativa" then
 		return
 	end
+	if renderizarTempoCongelado() then
+		return
+	end
 	local agoraServidor = Workspace:GetServerTimeNow()
 	local inicioTentativa = player:GetAttribute("InicioTentativaQuiz")
-	if typeof(inicioTentativa) == "number" then
-		local tempoConcluido = player:GetAttribute("TempoConclusaoQuiz")
-		-- O cronômetro grande acompanha esta tentativa; o resultado concluído
-		-- permanece no atributo do servidor para a leaderboard.
-		local decorrido = typeof(tempoConcluido) == "number"
-			and 0
-			or math.max(0, agoraServidor - inicioTentativa)
-		local totalTentativaMs = math.floor(decorrido * 1000)
-		local minutosTentativa = math.floor(totalTentativaMs / 60000)
-		local segundosTentativa = math.floor((totalTentativaMs % 60000) / 1000)
-		local milissegundosTentativa = totalTentativaMs % 1000
-		local textoTentativa = string.format("%02d:%02d.%03d", minutosTentativa, segundosTentativa, milissegundosTentativa)
+	local tempoConclusao = player:GetAttribute("TempoConclusaoQuiz")
+	if typeof(tempoConclusao) == "number" then
+		local textoTentativa = formatarTempo(tempoConclusao)
+		if textoTentativa ~= ultimoTextoCronometroTentativa then
+			ultimoTextoCronometroTentativa = textoTentativa
+			timerLabel.Text = textoTentativa
+			timerLabel.TextColor3 = Color3.fromRGB(255, 220, 86)
+		end
+	elseif typeof(inicioTentativa) == "number" then
+		local textoTentativa = formatarTempo(agoraServidor - inicioTentativa)
 		if textoTentativa ~= ultimoTextoCronometroTentativa then
 			ultimoTextoCronometroTentativa = textoTentativa
 			timerLabel.Text = textoTentativa
@@ -447,11 +479,7 @@ RunService.Heartbeat:Connect(function()
 		return
 	end
 	local restante = math.max(0, fimTentativa - agoraServidor)
-	local totalMilissegundos = math.floor(restante * 1000)
-	local minutos = math.floor(totalMilissegundos / 60000)
-	local segundos = math.floor((totalMilissegundos % 60000) / 1000)
-	local milissegundos = totalMilissegundos % 1000
-	local texto = string.format("%02d:%02d.%03d", minutos, segundos, milissegundos)
+	local texto = formatarTempo(restante)
 	local tentativa = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
 	local textoPrazoRodada = string.format("RODADA %d  ·  RESTA %s", tentativa, texto)
 	if textoPrazoRodada ~= ultimoTextoPrazoRodada then
