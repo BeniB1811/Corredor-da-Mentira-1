@@ -18,7 +18,8 @@ local function obterPlacar(): BasePart?
 	if placarEmCache and placarEmCache:IsDescendantOf(Workspace) then
 		return placarEmCache
 	end
-	local encontrado = Workspace:FindFirstChild(NOME_PLACAR)
+	-- O serviço do placar preserva uma peça existente, mesmo que esteja dentro de um Model.
+	local encontrado = Workspace:FindFirstChild(NOME_PLACAR, true)
 	if encontrado and encontrado:IsA("BasePart") then
 		placarEmCache = encontrado
 		return encontrado
@@ -42,7 +43,9 @@ end
 
 local function temLinhaDeVisao(camera: Camera, placar: BasePart, moldura: Model?, personagem: Model?): boolean
 	local origem = camera.CFrame.Position
-	local normalFrontal = -placar.CFrame.LookVector
+	-- A SurfaceGui usa Face = Front, cuja normal é o LookVector (-Z local).
+	-- Testar o vetor invertido escondia o painel para quem estava no lado correto.
+	local normalFrontal = placar.CFrame.LookVector
 	if normalFrontal:Dot(origem - placar.Position) <= 0 then
 		return false
 	end
