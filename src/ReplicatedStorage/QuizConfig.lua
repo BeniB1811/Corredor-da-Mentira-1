@@ -1,7 +1,7 @@
 --!strict
 -- Configuração compartilhada. O banco de questões fica em ServerStorage para manter o gabarito privado.
 local QuizConfig = {
-	DURACAO_RODADA_SEGUNDOS = 300,
+	DURACAO_RODADA_SEGUNDOS = 600,
 	INTERVALO_ENTRE_RODADAS_SEGUNDOS = 5,
 	TEMPO_PREPARACAO_RODADA_SEGUNDOS = 2,
 	TEMPO_EXIBICAO_RESULTADO = 1.5,
