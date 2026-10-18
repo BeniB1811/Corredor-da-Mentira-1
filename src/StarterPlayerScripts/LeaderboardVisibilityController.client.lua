@@ -32,7 +32,7 @@ local function obterMoldura(): Model?
 	if molduraEmCache and molduraEmCache:IsDescendantOf(Workspace) then
 		return molduraEmCache
 	end
-	local encontrada = Workspace:FindFirstChild(NOME_MOLDURA)
+	local encontrada = Workspace:FindFirstChild(NOME_MOLDURA, true)
 	if encontrada and encontrada:IsA("Model") then
 		molduraEmCache = encontrada
 		return encontrada

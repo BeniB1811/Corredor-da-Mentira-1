@@ -13,6 +13,7 @@ local DIRECAO_PLACAR = Vector3.new(0, 0, -1)
 local DISTANCIA_DESTAQUE = 1.25
 local TAMANHO_PLACAR = Vector3.new(13, 9, 0.46)
 local MAX_JOGADORES = 10
+local NOME_MODELO_PERSISTENTE = "LeaderboardPersistentDisplay"
 
 type EntradaRanking = {
 	Player: Player,
@@ -47,16 +48,37 @@ end
 
 local part = obterOuCriarParte()
 
+-- O controlador local precisa encontrar a placa mesmo quando ela está fora do
+-- raio de streaming do personagem. O modelo contém apenas os componentes do
+-- painel e permanece disponível sem desativar a oclusão normal por paredes.
+local modeloExistente = Workspace:FindFirstChild(NOME_MODELO_PERSISTENTE)
+if modeloExistente and not modeloExistente:IsA("Model") then
+	modeloExistente:Destroy()
+	modeloExistente = nil
+end
+
+local modeloPersistente: Model
+if modeloExistente and modeloExistente:IsA("Model") then
+	modeloPersistente = modeloExistente
+else
+	modeloPersistente = Instance.new("Model")
+	modeloPersistente.Name = NOME_MODELO_PERSISTENTE
+end
+modeloPersistente.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+modeloPersistente.Parent = nil
+part.Parent = modeloPersistente
+
 -- Moldura 3D presa ao mesmo plano e orientação da tela. As barras ficam
 -- fora do canvas para manter a leitura da SurfaceGui desobstruída.
-local molduraAntiga = Workspace:FindFirstChild("LeaderboardPhysicalFrame")
+local molduraAntiga = Workspace:FindFirstChild("LeaderboardPhysicalFrame", true)
 if molduraAntiga then
 	molduraAntiga:Destroy()
 end
 
 local moldura = Instance.new("Model")
 moldura.Name = "LeaderboardPhysicalFrame"
-moldura.Parent = Workspace
+moldura.ModelStreamingMode = Enum.ModelStreamingMode.Atomic
+moldura.Parent = modeloPersistente
 
 local function criarPecaMoldura(nome: string, tamanho: Vector3, deslocamento: CFrame, cor: Color3, material: Enum.Material, formato: Enum.PartType?)
 	local peca = Instance.new("Part")
@@ -394,3 +416,5 @@ for _, player in ipairs(Players:GetPlayers()) do
 	observarJogador(player)
 end
 atualizar()
+-- Publica o conjunto já montado como uma única unidade persistente.
+modeloPersistente.Parent = Workspace
