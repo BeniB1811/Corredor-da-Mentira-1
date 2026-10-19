@@ -176,6 +176,67 @@ local resetScale = (reset:FindFirstChildOfClass("UIScale") or Instance.new("UISc
 resetScale.Scale = 1
 resetScale.Parent = reset
 
+local botaoTrocarModoObj = screenGui:FindFirstChild("BotaoTrocarModo")
+if botaoTrocarModoObj and not botaoTrocarModoObj:IsA("TextButton") then
+	botaoTrocarModoObj:Destroy()
+	botaoTrocarModoObj = nil
+end
+if not botaoTrocarModoObj then
+	botaoTrocarModoObj = Instance.new("TextButton")
+	botaoTrocarModoObj.Name = "BotaoTrocarModo"
+	botaoTrocarModoObj.Parent = screenGui
+end
+local botaoTrocarModo = botaoTrocarModoObj :: TextButton
+botaoTrocarModo.AnchorPoint = Vector2.new(0, 0)
+botaoTrocarModo.Position = UDim2.new(0, 160, 0, 6)
+botaoTrocarModo.Size = UDim2.fromOffset(150, 48)
+botaoTrocarModo.BackgroundColor3 = Color3.fromRGB(22, 36, 58)
+botaoTrocarModo.BackgroundTransparency = 0.08
+botaoTrocarModo.BorderSizePixel = 0
+botaoTrocarModo.AutoButtonColor = false
+botaoTrocarModo.Font = Enum.Font.GothamBlack
+botaoTrocarModo.Text = "🎮 MUDAR MODO"
+botaoTrocarModo.TextColor3 = Color3.fromRGB(255, 222, 105)
+botaoTrocarModo.TextScaled = true
+botaoTrocarModo.TextWrapped = true
+botaoTrocarModo.ZIndex = 20
+
+local trocarModoTextConstraint = (botaoTrocarModo:FindFirstChildOfClass("UITextSizeConstraint") or Instance.new("UITextSizeConstraint")) :: UITextSizeConstraint
+trocarModoTextConstraint.MinTextSize = 12
+trocarModoTextConstraint.MaxTextSize = 17
+trocarModoTextConstraint.Parent = botaoTrocarModo
+
+local trocarModoCorner = (botaoTrocarModo:FindFirstChildOfClass("UICorner") or Instance.new("UICorner")) :: UICorner
+trocarModoCorner.CornerRadius = UDim.new(0, 12)
+trocarModoCorner.Parent = botaoTrocarModo
+
+local trocarModoStroke = (botaoTrocarModo:FindFirstChildOfClass("UIStroke") or Instance.new("UIStroke")) :: UIStroke
+trocarModoStroke.Color = Color3.fromRGB(255, 204, 60)
+trocarModoStroke.Thickness = 1.5
+trocarModoStroke.Parent = botaoTrocarModo
+
+local trocarModoScale = (botaoTrocarModo:FindFirstChildOfClass("UIScale") or Instance.new("UIScale")) :: UIScale
+trocarModoScale.Scale = 1
+trocarModoScale.Parent = botaoTrocarModo
+
+local function animarBotaoTrocarModo(pressionado: boolean)
+	local info = TweenInfo.new(0.09, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	TweenService:Create(trocarModoScale, info, { Scale = pressionado and 0.95 or 1 }):Play()
+	TweenService:Create(botaoTrocarModo, info, {
+		BackgroundColor3 = pressionado and Color3.fromRGB(15, 25, 42) or Color3.fromRGB(22, 36, 58),
+	}):Play()
+end
+botaoTrocarModo.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		animarBotaoTrocarModo(true)
+	end
+end)
+botaoTrocarModo.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		animarBotaoTrocarModo(false)
+	end
+end)
+
 local somPergunta = (screenGui:FindFirstChild("SomPerguntaAparecer") or Instance.new("Sound")) :: Sound
 somPergunta.Name = "SomPerguntaAparecer"
 somPergunta.SoundId = "rbxassetid://9069609200"
@@ -245,6 +306,18 @@ local cardScale = Instance.new("UIScale")
 cardScale.Name = "CardScale"
 cardScale.Scale = 1
 cardScale.Parent = card
+
+local fecharModalBtn = Instance.new("TextButton")
+fecharModalBtn.Name = "FecharModal"
+fecharModalBtn.Size = UDim2.fromOffset(36, 36)
+fecharModalBtn.Position = UDim2.new(1, -44, 0, 8)
+fecharModalBtn.BackgroundTransparency = 1
+fecharModalBtn.Font = Enum.Font.GothamBold
+fecharModalBtn.Text = "×"
+fecharModalBtn.TextColor3 = Color3.fromRGB(220, 235, 255)
+fecharModalBtn.TextSize = 28
+fecharModalBtn.ZIndex = 52
+fecharModalBtn.Parent = card
 
 local modalTitle = Instance.new("TextLabel")
 modalTitle.Name = "Title"
@@ -444,22 +517,15 @@ local function fecharModalModo()
 	cardScale.Scale = 1.0
 end
 
+fecharModalBtn.Activated:Connect(fecharModalModo)
+botaoTrocarModo.Activated:Connect(mostrarModalModo)
+
 local function escolherModo(comCronometro: boolean)
 	pcall(function() somClique:Play() end)
 	if DefinirModoJogo then
 		DefinirModoJogo:FireServer(comCronometro)
 	end
-	player:SetAttribute("ModoComCronometro", comCronometro)
 	fecharModalModo()
-	if comCronometro then
-		timerLabel.Visible = true
-		mostrarToast("Modo Ranqueado Ativado! 10 minutos de prova.", Color3.fromRGB(255, 215, 90))
-	else
-		timerLabel.Visible = false
-		statusLabel.Text = "MODO LIVRE · SEM CRONÔMETRO"
-		statusLabel.TextColor3 = Color3.fromRGB(120, 235, 175)
-		mostrarToast("Modo Livre Ativado! Jogue no seu próprio ritmo.", Color3.fromRGB(120, 235, 175))
-	end
 end
 
 btnCom.Activated:Connect(function()
@@ -687,14 +753,49 @@ ControlarPorta.OnClientEvent:Connect(function(nomePorta: string, aberta: boolean
 	aplicarEstadoPorta(objeto, aberta)
 end)
 
-ResetarClient.OnClientEvent:Connect(function()
-	fecharInterface()
+local function sincronizarPortasLocais()
 	for nivel = 0, 10 do
-		aplicarEstadoPorta(Workspace:FindFirstChild(string.format("PortaNivel%d Geografia", nivel), true), false)
+		local aberta = player:GetAttribute("QuizFeito_Nivel" .. nivel) == true
+		local objeto = Workspace:FindFirstChild(string.format("PortaNivel%d Geografia", nivel), true)
+		aplicarEstadoPorta(objeto, aberta)
 	end
 	for nivel = 1, 10 do
-		aplicarEstadoPorta(Workspace:FindFirstChild(string.format("PortaNivel%d História", nivel), true), false)
+		local aberta = player:GetAttribute("QuizHistoriaFeito_Nivel" .. nivel) == true
+		local objeto = Workspace:FindFirstChild(string.format("PortaNivel%d História", nivel), true)
+		aplicarEstadoPorta(objeto, aberta)
 	end
+end
+
+for nivel = 0, 10 do
+	local attr = "QuizFeito_Nivel" .. nivel
+	player:GetAttributeChangedSignal(attr):Connect(function()
+		local aberta = player:GetAttribute(attr) == true
+		local objeto = Workspace:FindFirstChild(string.format("PortaNivel%d Geografia", nivel), true)
+		aplicarEstadoPorta(objeto, aberta)
+	end)
+end
+
+for nivel = 1, 10 do
+	local attr = "QuizHistoriaFeito_Nivel" .. nivel
+	player:GetAttributeChangedSignal(attr):Connect(function()
+		local aberta = player:GetAttribute(attr) == true
+		local objeto = Workspace:FindFirstChild(string.format("PortaNivel%d História", nivel), true)
+		aplicarEstadoPorta(objeto, aberta)
+	end)
+end
+
+player.CharacterAdded:Connect(function()
+	task.wait(0.2)
+	sincronizarPortasLocais()
+end)
+
+ResetarClient.OnClientEvent:Connect(function()
+	fecharInterface()
+	sincronizarPortasLocais()
+end)
+
+task.defer(function()
+	sincronizarPortasLocais()
 end)
 
 AbrirQuiz.OnClientEvent:Connect(function(dados: any)
@@ -951,8 +1052,18 @@ local function observarModo()
 			statusLabel.Text = "MODO LIVRE · SEM CRONÔMETRO"
 		end
 		statusLabel.TextColor3 = Color3.fromRGB(120, 235, 175)
+		botaoTrocarModo.Text = "🎯 MODO: LIVRE"
+		botaoTrocarModo.TextColor3 = Color3.fromRGB(120, 235, 175)
+		trocarModoStroke.Color = Color3.fromRGB(50, 220, 175)
 	elseif modo == true then
 		timerLabel.Visible = true
+		botaoTrocarModo.Text = "⏱️ MODO: RANQUEADO"
+		botaoTrocarModo.TextColor3 = Color3.fromRGB(255, 222, 105)
+		trocarModoStroke.Color = Color3.fromRGB(255, 204, 60)
+	else
+		botaoTrocarModo.Text = "🎮 MUDAR MODO"
+		botaoTrocarModo.TextColor3 = Color3.fromRGB(255, 222, 105)
+		trocarModoStroke.Color = Color3.fromRGB(255, 204, 60)
 	end
 end
 player:GetAttributeChangedSignal("ModoComCronometro"):Connect(observarModo)

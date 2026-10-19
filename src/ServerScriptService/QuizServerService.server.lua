@@ -62,16 +62,6 @@ local SolicitarReset = remote("SolicitarReset", "RemoteEvent") :: RemoteEvent
 local ObterEstadoRodada = remote("ObterEstadoRodada", "RemoteFunction") :: RemoteFunction
 local DefinirModoJogo = remote(QuizConfig.NOME_REMOTE_MODO or "DefinirModoJogo", "RemoteEvent") :: RemoteEvent
 
-DefinirModoJogo.OnServerEvent:Connect(function(player: Player, comCronometro: any)
-	local modo = comCronometro == true
-	player:SetAttribute("ModoComCronometro", modo)
-	if modo then
-		notificar(player, "Modo RANQUEADO: Com cronômetro de 10 min e participação no Ranking Global!", Color3.fromRGB(255, 215, 80))
-	else
-		notificar(player, "Modo LIVRE: Jogue no seu próprio ritmo, sem tempo limite e sem cronômetro!", Color3.fromRGB(120, 230, 160))
-	end
-end)
-
 local FASE_TUTORIAL = "Tutorial"
 local FASE_PREPARACAO = "Preparando"
 local FASE_ATIVA = "Ativa"
@@ -566,97 +556,104 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 	local nomeAtributo = sessao.Materia == "Geografia"
 		and ("QuizFeito_Nivel" .. sessao.Nivel)
 		or ("QuizHistoriaFeito_Nivel" .. sessao.Nivel)
-	player:SetAttribute(nomeAtributo, true)
 
 	local pontos = obterPontuacao(player)
-	if acertou and not sessao.Tutorial then
-		pontos = math.min(QuizConfig.MAX_ACERTOS, pontos + 1)
-		player:SetAttribute("AcertosQuiz", pontos)
-		atualizarLeaderstats(player, pontos)
-	end
+	if acertou then
+		player:SetAttribute(nomeAtributo, true)
 
-	if not sessao.Tutorial
-		and pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
-		and not tentativaAprovadaCongelada(player)
-	then
-		local agoraServidor = Workspace:GetServerTimeNow()
-		if comCronometro then
-			local inicioTentativa = inicioTentativaTimestamp[player]
-				or (tonumber(player:GetAttribute("InicioTentativaQuiz")) :: number?)
-				or inicioRodadaTimestamp
-			local fimTentativa = fimTentativaTimestamp[player]
-				or (tonumber(player:GetAttribute("FimTentativaQuiz")) :: number?)
-				or agoraServidor
-			player:SetAttribute("TempoConclusaoQuiz", math.max(0, agoraServidor - inicioTentativa))
-			player:SetAttribute("TempoRestanteCongeladoQuiz", math.max(0, fimTentativa - agoraServidor))
-			notificar(
-				player,
-				"Você alcançou 15 acertos! Tempo congelado e enviado para o Ranking Global.",
-				Color3.fromRGB(120, 235, 165)
-			)
-		else
-			notificar(
-				player,
-				"Parabéns! Você alcançou 15 acertos e o Portão de Recompensas está liberado!",
-				Color3.fromRGB(120, 235, 165)
-			)
+		if not sessao.Tutorial then
+			pontos = math.min(QuizConfig.MAX_ACERTOS, pontos + 1)
+			player:SetAttribute("AcertosQuiz", pontos)
+			atualizarLeaderstats(player, pontos)
 		end
-	end
 
-	ControlarPorta:FireClient(player, sessao.NomePorta, true)
-	local proximo = progresso[player]
-	if sessao.Tutorial then
-		tutorialConcluido[player] = true
-		progresso[player] = { Materia = "Geografia", Nivel = 1 }
-		notificar(player, "Tutorial concluído. A rodada começa quando todos terminarem.", Color3.fromRGB(90, 230, 150))
-		tentarIniciarRodada()
-	elseif proximo and proximo.Materia == sessao.Materia and proximo.Nivel == sessao.Nivel then
-		local reiniciarPorPontuacaoInsuficiente = false
-		if sessao.Materia == "História"
-			and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
-			and player:GetAttribute("TempoConclusaoQuiz") == nil
-			and (inicioTentativaTimestamp[player] or inicioRodadaTimestamp) > 0
-			and comCronometro
+		if not sessao.Tutorial
+			and pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
+			and not tentativaAprovadaCongelada(player)
 		then
-			local inicioTentativa = inicioTentativaTimestamp[player] or inicioRodadaTimestamp
-			player:SetAttribute("TempoConclusaoQuiz", math.max(0, Workspace:GetServerTimeNow() - inicioTentativa))
+			local agoraServidor = Workspace:GetServerTimeNow()
+			if comCronometro then
+				local inicioTentativa = inicioTentativaTimestamp[player]
+					or (tonumber(player:GetAttribute("InicioTentativaQuiz")) :: number?)
+					or inicioRodadaTimestamp
+				local fimTentativa = fimTentativaTimestamp[player]
+					or (tonumber(player:GetAttribute("FimTentativaQuiz")) :: number?)
+					or agoraServidor
+				player:SetAttribute("TempoConclusaoQuiz", math.max(0, agoraServidor - inicioTentativa))
+				player:SetAttribute("TempoRestanteCongeladoQuiz", math.max(0, fimTentativa - agoraServidor))
+				notificar(
+					player,
+					"Você alcançou 15 acertos! Tempo congelado e enviado para o Ranking Global.",
+					Color3.fromRGB(120, 235, 165)
+				)
+			else
+				notificar(
+					player,
+					"Parabéns! Você alcançou 15 acertos e o Portão de Recompensas está liberado!",
+					Color3.fromRGB(120, 235, 165)
+				)
+			end
 		end
-		local finalDaTentativa = sessao.Materia == "História" and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
-		if finalDaTentativa and pontos < QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS then
-			reiniciarPorPontuacaoInsuficiente = true
-		end
-		local destino = proximoNivel(sessao.Materia, sessao.Nivel)
-		if reiniciarPorPontuacaoInsuficiente then
+
+		ControlarPorta:FireClient(player, sessao.NomePorta, true)
+		local proximo = progresso[player]
+		if sessao.Tutorial then
+			tutorialConcluido[player] = true
 			progresso[player] = { Materia = "Geografia", Nivel = 1 }
-		elseif sessao.Nivel == QuizConfig.NIVEL_FINAL_GEOGRAFIA and sessao.Materia == "Geografia" then
-			resetarPortasDeMateria(player, "História")
-		elseif sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA and sessao.Materia == "História" then
-			resetarPortasDeMateria(player, "Geografia")
+			notificar(player, "Tutorial concluído! A rodada começa quando todos terminarem.", Color3.fromRGB(90, 230, 150))
+			tentarIniciarRodada()
+		elseif proximo and proximo.Materia == sessao.Materia and proximo.Nivel == sessao.Nivel then
+			local reiniciarPorPontuacaoInsuficiente = false
+			if sessao.Materia == "História"
+				and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
+				and player:GetAttribute("TempoConclusaoQuiz") == nil
+				and (inicioTentativaTimestamp[player] or inicioRodadaTimestamp) > 0
+				and comCronometro
+			then
+				local inicioTentativa = inicioTentativaTimestamp[player] or inicioRodadaTimestamp
+				player:SetAttribute("TempoConclusaoQuiz", math.max(0, Workspace:GetServerTimeNow() - inicioTentativa))
+			end
+			local finalDaTentativa = sessao.Materia == "História" and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
+			if finalDaTentativa and pontos < QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS then
+				reiniciarPorPontuacaoInsuficiente = true
+			end
+			local destino = proximoNivel(sessao.Materia, sessao.Nivel)
+			if reiniciarPorPontuacaoInsuficiente then
+				progresso[player] = { Materia = "Geografia", Nivel = 1 }
+			elseif sessao.Nivel == QuizConfig.NIVEL_FINAL_GEOGRAFIA and sessao.Materia == "Geografia" then
+				resetarPortasDeMateria(player, "História")
+			elseif sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA and sessao.Materia == "História" then
+				resetarPortasDeMateria(player, "Geografia")
+			end
+			if not reiniciarPorPontuacaoInsuficiente then
+				progresso[player] = destino
+			end
+			if reiniciarPorPontuacaoInsuficiente then
+				local tentativaConcluida = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+				task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
+					if player.Parent == Players
+						and fase == FASE_ATIVA
+						and participantes[player] == true
+						and (tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1) == tentativaConcluida
+					then
+						resetarTentativa(player, true)
+						task.defer(teleportarParaNivel, player, "Geografia", 1)
+						local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+						notificar(player, string.format("Você terminou com %d/%d. São necessários %d acertos; nova rodada iniciada (rodada %d).", pontos, QuizConfig.MAX_ACERTOS, QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS, tentativaAtual), Color3.fromRGB(255, 190, 100))
+					end
+				end)
+			elseif destino.Nivel == 1 and destino.Materia ~= sessao.Materia then
+				task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
+					if player.Parent == Players and fase == FASE_ATIVA and participantes[player] then
+						teleportarParaNivel(player, destino.Materia, destino.Nivel)
+					end
+				end)
+			end
 		end
-		if not reiniciarPorPontuacaoInsuficiente then
-			progresso[player] = destino
-		end
-		if reiniciarPorPontuacaoInsuficiente then
-			local tentativaConcluida = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
-			task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
-				if player.Parent == Players
-					and fase == FASE_ATIVA
-					and participantes[player] == true
-					and (tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1) == tentativaConcluida
-				then
-					resetarTentativa(player, true)
-					task.defer(teleportarParaNivel, player, "Geografia", 1)
-					local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
-					notificar(player, string.format("Você terminou com %d/%d. São necessários %d acertos; nova rodada iniciada (rodada %d).", pontos, QuizConfig.MAX_ACERTOS, QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS, tentativaAtual), Color3.fromRGB(255, 190, 100))
-				end
-			end)
-		elseif destino.Nivel == 1 and destino.Materia ~= sessao.Materia then
-			task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
-				if player.Parent == Players and fase == FASE_ATIVA and participantes[player] then
-					teleportarParaNivel(player, destino.Materia, destino.Nivel)
-				end
-			end)
-		end
+	else
+		-- Errou a questão: a porta NÃO abre e o jogador tenta novamente
+		ControlarPorta:FireClient(player, sessao.NomePorta, false)
+		notificar(player, "Você errou a alternativa! Tente novamente no botão para abrir a porta.", Color3.fromRGB(255, 110, 110))
 	end
 
 	local resultado = {
@@ -893,6 +890,76 @@ SolicitarReset.OnServerEvent:Connect(function(player: Player)
 	if botaoReset then
 		task.spawn(animarBotaoReset)
 	end
+end)
+
+DefinirModoJogo.OnServerEvent:Connect(function(player: Player, comCronometro: any)
+	local novoModo = comCronometro == true
+	local modoAtual = player:GetAttribute("ModoComCronometro")
+
+	-- Se a pessoa mudar para o modo cronometrado estando no modo cronometrado, nada acontece
+	if modoAtual == true and novoModo == true then
+		return
+	end
+
+	-- Se a pessoa estiver no modo cronometrado e for para o modo sem cronômetro:
+	-- Salva aquela tentativa como mais uma, e se for o recorde da pessoa ele salva na leaderboard
+	if modoAtual == true and novoModo == false then
+		local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+		player:SetAttribute("NumeroTentativaQuiz", tentativaAtual + 1)
+
+		-- Finaliza o tempo decorrido da tentativa para avaliação de recorde na leaderboard
+		if player:GetAttribute("TempoConclusaoQuiz") == nil then
+			local inicio = inicioTentativaTimestamp[player]
+				or (tonumber(player:GetAttribute("InicioTentativaQuiz")) :: number?)
+				or inicioRodadaTimestamp
+			if inicio and inicio > 0 then
+				local tempoDecorrido = math.max(0, Workspace:GetServerTimeNow() - inicio)
+				player:SetAttribute("TempoConclusaoQuiz", tempoDecorrido)
+			end
+		end
+
+		-- Aguarda brevemente para que o LeaderboardService capture os novos atributos antes de desativar o modo
+		task.wait(0.2)
+
+		-- Altera para modo livre: remove prazos e esvazia timestamps
+		player:SetAttribute("ModoComCronometro", false)
+		fimTentativaTimestamp[player] = nil
+		inicioTentativaTimestamp[player] = nil
+		player:SetAttribute("FimTentativaQuiz", nil)
+		player:SetAttribute("InicioTentativaQuiz", nil)
+
+		notificar(player, "Modo LIVRE ativado! Sua tentativa com cronômetro foi salva na leaderboard.", Color3.fromRGB(120, 235, 160))
+		return
+	end
+
+	-- Se a pessoa estiver no modo livre (ou ainda não escolheu) e for para o modo cronometrado:
+	-- Ela reseta de fato, perdendo o progresso no modo livre e iniciando uma tentativa com cronômetro
+	if (modoAtual == false or modoAtual == nil) and novoModo == true then
+		player:SetAttribute("ModoComCronometro", true)
+		participantes[player] = true
+
+		-- Reseta tudo: acertos, portas e tentativa
+		resetarTentativa(player, true)
+
+		local destino = tutorialConcluido[player] and 1 or 0
+		task.defer(teleportarParaNivel, player, "Geografia", destino)
+
+		notificar(
+			player,
+			"Modo RANQUEADO ativado! Progresso reiniciado; você tem 10 minutos para concluir o percurso.",
+			Color3.fromRGB(255, 215, 80)
+		)
+		return
+	end
+
+	-- Se já estava no modo livre e selecionou modo livre novamente, nada acontece
+	if modoAtual == false and novoModo == false then
+		return
+	end
+
+	-- Primeira inicialização de modo livre
+	player:SetAttribute("ModoComCronometro", false)
+	notificar(player, "Modo LIVRE ativado: Jogue no seu próprio ritmo, sem tempo limite e sem cronômetro!", Color3.fromRGB(120, 230, 160))
 end)
 
 local function configurarBotaoReset()
@@ -1198,10 +1265,86 @@ Workspace.DescendantAdded:Connect(function(descendant: Instance)
 	end
 end)
 
+local ultimoAvisoPortaSemAcesso: { [Player]: number } = {}
+
+local function extrairPorta(nome: string): (number?, string?)
+	for nivel = 0, QuizConfig.NIVEL_FINAL_GEOGRAFIA do
+		if nome == string.format("PortaNivel%d Geografia", nivel) then
+			return nivel, "Geografia"
+		end
+	end
+	for nivel = 1, QuizConfig.NIVEL_FINAL_HISTORIA do
+		if nome == string.format("PortaNivel%d História", nivel) then
+			return nivel, "História"
+		end
+	end
+	return nil, nil
+end
+
+local function conectarPortaFisica(door: BasePart)
+	local nivel, materia = extrairPorta(door.Name)
+	if not nivel or not materia then
+		return
+	end
+	door.CanCollide = true
+	door.CanTouch = true
+	door.Touched:Connect(function(hit: BasePart)
+		local character = hit:FindFirstAncestorOfClass("Model")
+		local p = character and Players:GetPlayerFromCharacter(character)
+		if not p or not character then
+			return
+		end
+		local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not rootPart or not humanoid or humanoid.Health <= 0 then
+			return
+		end
+
+		local atributo = materia == "Geografia" and ("QuizFeito_Nivel" .. nivel) or ("QuizHistoriaFeito_Nivel" .. nivel)
+		local liberado = p:GetAttribute(atributo) == true
+
+		if not liberado then
+			-- O jogador NÃO acertou este nível. Repele o jogador para trás da porta!
+			local normal = door.CFrame.LookVector
+			local offset = (rootPart.Position - door.Position)
+			local dot = offset:Dot(normal)
+			local dirRepulsao = if dot >= 0 then normal else -normal
+
+			rootPart.AssemblyLinearVelocity = Vector3.zero
+			rootPart.AssemblyAngularVelocity = Vector3.zero
+			character:PivotTo(character:GetPivot() + dirRepulsao * 3.5)
+
+			local agora = os.clock()
+			if agora - (ultimoAvisoPortaSemAcesso[p] or 0) > 1.8 then
+				ultimoAvisoPortaSemAcesso[p] = agora
+				notificar(
+					p,
+					string.format("A porta está trancada! Responda o quiz de %s nível %d para abri-la.", materia, nivel),
+					Color3.fromRGB(255, 90, 90)
+				)
+			end
+		end
+	end)
+end
+
+local function configurarBloqueioPortasServidor()
+	for _, desc in ipairs(Workspace:GetDescendants()) do
+		if desc:IsA("BasePart") and extrairPorta(desc.Name) ~= nil then
+			conectarPortaFisica(desc)
+		end
+	end
+	Workspace.DescendantAdded:Connect(function(desc)
+		if desc:IsA("BasePart") and extrairPorta(desc.Name) ~= nil then
+			task.defer(conectarPortaFisica, desc)
+		end
+	end)
+end
+
 configurarPortaoRecompensas()
 estilizarBotaoReset()
 configurarBotaoReset()
 configurarPortais()
+configurarBloqueioPortasServidor()
 
 Players.PlayerAdded:Connect(inicializarJogador)
 Players.PlayerRemoving:Connect(removerJogador)
