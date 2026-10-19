@@ -1,8 +1,11 @@
 --!strict
--- Placar do servidor atual. Atualiza quando pontuação ou conclusão mudam.
+-- Placar de recordes globais persistente via DataStoreService.
+-- Classifica os jogadores por maior número de acertos e menor tempo de conclusão.
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
+local DataStoreService = game:GetService("DataStoreService")
+local RunService = game:GetService("RunService")
 
 local QuizConfig = require(ReplicatedStorage:WaitForChild("QuizConfig"))
 
@@ -15,11 +18,114 @@ local TAMANHO_PLACAR = Vector3.new(13, 9, 0.46)
 local MAX_JOGADORES = 10
 local NOME_MODELO_PERSISTENTE = "LeaderboardPersistentDisplay"
 
+-- Nomes das chaves de DataStore
+local NOME_ORDERED_STORE = "QuizRankingGlobal_v2"
+local NOME_STATS_STORE = "QuizPlayerStats_v2"
+local INTERVALO_ATUALIZACAO_GLOBAL = 30 -- segundos entre consultas ao Top 10
+
+-- Fatores para combinar Acertos e Menor Tempo em um único inteiro ordenável:
+-- Score = (Acertos * 10.000.000) + max(1, 10.000.000 - TempoEmMs)
+-- 20 acertos em 60s -> 200.000.000 + 9.940.000 = 209.940.000
+-- 20 acertos em 120s -> 200.000.000 + 9.880.000 = 208.880.000 (menor tempo tem score maior)
+-- 19 acertos -> na faixa dos 190.000.000 (nunca passa quem fez 20)
+local FATOR_ACERTOS = 10_000_000
+local BASE_TEMPO_MS = 10_000_000
+
+type RecordeJogador = {
+	UserId: number,
+	DisplayName: string,
+	Name: string,
+	Acertos: number,
+	Tempo: number?,
+	Timestamp: number,
+}
+
 type EntradaRanking = {
-	Player: Player,
+	UserId: number,
+	NomeFormatado: string,
 	Pontos: number,
 	TempoConclusao: number?,
 }
+
+local recordesLocais: { [number]: RecordeJogador } = {}
+local nomesCache: { [number]: string } = {}
+local pendenteSalvar: { [number]: boolean } = {}
+local debounceSalvar: { [number]: number } = {}
+
+local function calcularScore(acertos: number, tempoSegundos: number?): number
+	if acertos <= 0 then
+		return 0
+	end
+	local pontosAcertos = math.clamp(acertos, 0, QuizConfig.MAX_ACERTOS) * FATOR_ACERTOS
+	local pontosTempo = 0
+	if typeof(tempoSegundos) == "number" and tempoSegundos > 0 then
+		local ms = math.floor(tempoSegundos * 1000 + 0.5)
+		pontosTempo = math.clamp(BASE_TEMPO_MS - ms, 1, BASE_TEMPO_MS)
+	end
+	return pontosAcertos + pontosTempo
+end
+
+local function decodificarScore(score: number): (number, number?)
+	if score <= 0 then
+		return 0, nil
+	end
+	local acertos = math.floor(score / FATOR_ACERTOS)
+	local sobra = score % FATOR_ACERTOS
+	local tempoSegundos: number? = nil
+	if sobra > 0 then
+		local ms = BASE_TEMPO_MS - sobra
+		if ms >= 0 then
+			tempoSegundos = ms / 1000
+		end
+	end
+	return acertos, tempoSegundos
+end
+
+local function obterNomeFormatado(userId: number): string
+	local online = Players:GetPlayerByUserId(userId)
+	if online then
+		local formatado = string.format("%s  (@%s)", online.DisplayName, online.Name)
+		nomesCache[userId] = formatado
+		return formatado
+	end
+	if nomesCache[userId] then
+		return nomesCache[userId]
+	end
+	local ok, nome = pcall(function()
+		return Players:GetNameFromUserIdAsync(userId)
+	end)
+	if ok and typeof(nome) == "string" and #nome > 0 then
+		local formatado = string.format("%s  (@%s)", nome, nome)
+		nomesCache[userId] = formatado
+		return formatado
+	end
+	return string.format("Jogador_%d", userId)
+end
+
+local function salvarRecordeNoDataStore(recorde: RecordeJogador)
+	local score = calcularScore(recorde.Acertos, recorde.Tempo)
+	if score <= 0 then
+		return
+	end
+	local userKey = tostring(recorde.UserId)
+
+	pcall(function()
+		local orderedStore = DataStoreService:GetOrderedDataStore(NOME_ORDERED_STORE)
+		orderedStore:SetAsync(userKey, score)
+	end)
+
+	pcall(function()
+		local statsStore = DataStoreService:GetDataStore(NOME_STATS_STORE)
+		statsStore:SetAsync(userKey, {
+			UserId = recorde.UserId,
+			DisplayName = recorde.DisplayName,
+			Name = recorde.Name,
+			Acertos = recorde.Acertos,
+			Tempo = recorde.Tempo,
+			Timestamp = recorde.Timestamp,
+		})
+	end)
+end
 
 local function obterOuCriarParte(): BasePart
 	local encontrada = Workspace:FindFirstChild(QuizConfig.NOME_QUADRO_LEADERBOARD, true)
@@ -48,9 +154,6 @@ end
 
 local part = obterOuCriarParte()
 
--- O controlador local precisa encontrar a placa mesmo quando ela está fora do
--- raio de streaming do personagem. O modelo contém apenas os componentes do
--- painel e permanece disponível sem desativar a oclusão normal por paredes.
 local modeloExistente = Workspace:FindFirstChild(NOME_MODELO_PERSISTENTE)
 if modeloExistente and not modeloExistente:IsA("Model") then
 	modeloExistente:Destroy()
@@ -68,8 +171,6 @@ modeloPersistente.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
 modeloPersistente.Parent = nil
 part.Parent = modeloPersistente
 
--- Moldura 3D presa ao mesmo plano e orientação da tela. As barras ficam
--- fora do canvas para manter a leitura da SurfaceGui desobstruída.
 local molduraAntiga = Workspace:FindFirstChild("LeaderboardPhysicalFrame", true)
 if molduraAntiga then
 	molduraAntiga:Destroy()
@@ -166,7 +267,6 @@ surface.Face = Enum.NormalId.Front
 surface.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
 surface.CanvasSize = Vector2.new(1000, 700)
 surface.LightInfluence = 0
--- A visibilidade por jogador é controlada localmente, incluindo as peças físicas.
 surface.AlwaysOnTop = false
 surface.MaxDistance = 0
 surface.ZOffset = 1
@@ -213,7 +313,7 @@ subtitle.Size = UDim2.new(1, -40, 0, 32)
 subtitle.Position = UDim2.fromOffset(20, 76)
 subtitle.BackgroundTransparency = 1
 subtitle.Font = Enum.Font.GothamMedium
-subtitle.Text = "RODADA ATUAL"
+subtitle.Text = "TOP 10 · RECORDES GLOBAIS"
 subtitle.TextColor3 = Color3.fromRGB(193, 207, 228)
 subtitle.TextSize = 20
 subtitle.TextXAlignment = Enum.TextXAlignment.Left
@@ -337,47 +437,70 @@ empty.Name = "Empty"
 empty.Size = UDim2.new(1, 0, 0, 52)
 empty.BackgroundTransparency = 1
 empty.Font = Enum.Font.GothamMedium
-empty.Text = "Aguardando jogadores..."
+empty.Text = "Carregando recordes..."
 empty.TextColor3 = Color3.fromRGB(216, 228, 242)
 empty.TextSize = 23
 empty.Parent = list
 
 local function obterListaOrdenada(): { EntradaRanking }
-	local dados: { EntradaRanking } = {}
-	for _, player in ipairs(Players:GetPlayers()) do
-		local pontos = player:GetAttribute("AcertosQuiz")
-		if typeof(pontos) ~= "number" then
-			pontos = 0
-		end
-		local tempoConclusao = player:GetAttribute("TempoConclusaoQuiz")
-		if typeof(tempoConclusao) ~= "number" or tempoConclusao < 0 then
-			tempoConclusao = nil
-		end
-		table.insert(dados, {
-			Player = player,
-			Pontos = math.clamp(math.floor(pontos), 0, QuizConfig.MAX_ACERTOS),
-			TempoConclusao = tempoConclusao,
-		})
-	end
-	table.sort(dados, function(a, b)
-		if a.Pontos ~= b.Pontos then
-			return a.Pontos > b.Pontos
-		end
-		if a.TempoConclusao ~= b.TempoConclusao then
-			if a.TempoConclusao == nil then return false end
-			if b.TempoConclusao == nil then return true end
-			return a.TempoConclusao < b.TempoConclusao
-		end
-		local nomeA = string.lower(a.Player.Name)
-		local nomeB = string.lower(b.Player.Name)
-		return nomeA < nomeB
+	local entradas: { EntradaRanking } = {}
+
+	-- 1. Tenta buscar do OrderedDataStore (Ranking Global persistente)
+	local sucesso, paginas = pcall(function()
+		local orderedStore = DataStoreService:GetOrderedDataStore(NOME_ORDERED_STORE)
+		return orderedStore:GetSortedAsync(false, MAX_JOGADORES)
 	end)
-	return dados
+
+	if sucesso and paginas then
+		local dados = paginas:GetCurrentPage()
+		for _, item in ipairs(dados) do
+			local uid = tonumber(item.key)
+			local val = tonumber(item.value)
+			if uid and val and val > 0 then
+				local acertos, tempo = decodificarScore(val)
+				table.insert(entradas, {
+					UserId = uid,
+					NomeFormatado = obterNomeFormatado(uid),
+					Pontos = acertos,
+					TempoConclusao = tempo,
+				})
+			end
+		end
+	end
+
+	-- 2. Fallback caso DataStore esteja indisponível (ex: Studio offline) ou sem dados ainda
+	if #entradas == 0 then
+		for _, rec in pairs(recordesLocais) do
+			if rec.Acertos > 0 then
+				table.insert(entradas, {
+					UserId = rec.UserId,
+					NomeFormatado = string.format("%s  (@%s)", rec.DisplayName, rec.Name),
+					Pontos = rec.Acertos,
+					TempoConclusao = rec.Tempo,
+				})
+			end
+		end
+		table.sort(entradas, function(a, b)
+			if a.Pontos ~= b.Pontos then
+				return a.Pontos > b.Pontos
+			end
+			if a.TempoConclusao ~= b.TempoConclusao then
+				if a.TempoConclusao == nil then return false end
+				if b.TempoConclusao == nil then return true end
+				return a.TempoConclusao < b.TempoConclusao
+			end
+			return a.NomeFormatado < b.NomeFormatado
+		end)
+	end
+
+	return entradas
 end
 
-local function atualizar()
+local function atualizarPlaca()
 	local dados = obterListaOrdenada()
 	empty.Visible = #dados == 0
+	empty.Text = #dados == 0 and "Aguardando recordes..." or ""
+
 	for index, row in ipairs(rows) do
 		local entry = dados[index]
 		row.Visible = entry ~= nil
@@ -386,9 +509,11 @@ local function atualizar()
 			local name = row:FindFirstChild("PlayerName") :: TextLabel
 			local score = row:FindFirstChild("Score") :: TextLabel
 			local time = row:FindFirstChild("CompletionTime") :: TextLabel
+
 			rank.Text = string.format("%02d", index)
-			name.Text = string.format("%s  (@%s)", entry.Player.DisplayName, entry.Player.Name)
+			name.Text = entry.NomeFormatado
 			score.Text = string.format("%d/%d", entry.Pontos, QuizConfig.MAX_ACERTOS)
+
 			if entry.TempoConclusao then
 				local totalMilissegundos = math.floor(entry.TempoConclusao * 1000 + 0.5)
 				local minutos = math.floor(totalMilissegundos / 60000)
@@ -402,19 +527,133 @@ local function atualizar()
 	end
 end
 
+local function carregarRecordeJogador(player: Player)
+	local userId = player.UserId
+	nomesCache[userId] = string.format("%s  (@%s)", player.DisplayName, player.Name)
+
+	local recorde: RecordeJogador? = nil
+	local ok, dados = pcall(function()
+		local statsStore = DataStoreService:GetDataStore(NOME_STATS_STORE)
+		return statsStore:GetAsync(tostring(userId))
+	end)
+
+	if ok and typeof(dados) == "table" and typeof(dados.Acertos) == "number" then
+		recorde = {
+			UserId = userId,
+			DisplayName = player.DisplayName,
+			Name = player.Name,
+			Acertos = math.clamp(math.floor(dados.Acertos), 0, QuizConfig.MAX_ACERTOS),
+			Tempo = typeof(dados.Tempo) == "number" and dados.Tempo or nil,
+			Timestamp = typeof(dados.Timestamp) == "number" and dados.Timestamp or os.time(),
+		}
+	else
+		recorde = {
+			UserId = userId,
+			DisplayName = player.DisplayName,
+			Name = player.Name,
+			Acertos = 0,
+			Tempo = nil,
+			Timestamp = os.time(),
+		}
+	end
+
+	recordesLocais[userId] = recorde
+	player:SetAttribute("RecordeAcertosQuiz", recorde.Acertos)
+	player:SetAttribute("RecordeTempoQuiz", recorde.Tempo)
+end
+
+local function verificarAtualizacaoRecorde(player: Player)
+	local userId = player.UserId
+	local recordeAtual = recordesLocais[userId]
+	if not recordeAtual then
+		return
+	end
+
+	local acertosTentativa = player:GetAttribute("AcertosQuiz")
+	if typeof(acertosTentativa) ~= "number" then
+		acertosTentativa = 0
+	end
+	acertosTentativa = math.clamp(math.floor(acertosTentativa), 0, QuizConfig.MAX_ACERTOS)
+
+	local tempoTentativa = player:GetAttribute("TempoConclusaoQuiz")
+	if typeof(tempoTentativa) ~= "number" or tempoTentativa <= 0 then
+		tempoTentativa = nil
+	end
+
+	local eNovoRecorde = false
+	if acertosTentativa > recordeAtual.Acertos then
+		eNovoRecorde = true
+	elseif acertosTentativa == recordeAtual.Acertos and acertosTentativa > 0 then
+		if tempoTentativa and (recordeAtual.Tempo == nil or tempoTentativa < recordeAtual.Tempo) then
+			eNovoRecorde = true
+		end
+	end
+
+	if eNovoRecorde then
+		recordeAtual.Acertos = acertosTentativa
+		recordeAtual.Tempo = tempoTentativa
+		recordeAtual.Timestamp = os.time()
+		player:SetAttribute("RecordeAcertosQuiz", acertosTentativa)
+		player:SetAttribute("RecordeTempoQuiz", tempoTentativa)
+		pendenteSalvar[userId] = true
+
+		local agora = os.clock()
+		local ultimo = debounceSalvar[userId] or 0
+		if agora - ultimo > 5 then
+			debounceSalvar[userId] = agora
+			task.defer(function()
+				salvarRecordeNoDataStore(recordeAtual)
+				pendenteSalvar[userId] = nil
+				atualizarPlaca()
+			end)
+		end
+	end
+end
+
 local function observarJogador(player: Player)
-	player:GetAttributeChangedSignal("AcertosQuiz"):Connect(atualizar)
-	player:GetAttributeChangedSignal("TempoConclusaoQuiz"):Connect(atualizar)
-	atualizar()
+	carregarRecordeJogador(player)
+	player:GetAttributeChangedSignal("AcertosQuiz"):Connect(function()
+		verificarAtualizacaoRecorde(player)
+	end)
+	player:GetAttributeChangedSignal("TempoConclusaoQuiz"):Connect(function()
+		verificarAtualizacaoRecorde(player)
+	end)
 end
 
 Players.PlayerAdded:Connect(observarJogador)
-Players.PlayerRemoving:Connect(function()
-	task.defer(atualizar)
+Players.PlayerRemoving:Connect(function(player)
+	local uid = player.UserId
+	local rec = recordesLocais[uid]
+	if rec and pendenteSalvar[uid] then
+		salvarRecordeNoDataStore(rec)
+		pendenteSalvar[uid] = nil
+	end
+	recordesLocais[uid] = nil
+	debounceSalvar[uid] = nil
+	task.defer(atualizarPlaca)
 end)
+
 for _, player in ipairs(Players:GetPlayers()) do
 	observarJogador(player)
 end
-atualizar()
--- Publica o conjunto já montado como uma única unidade persistente.
+
+-- Ciclo de atualização global periódico
+task.spawn(function()
+	while true do
+		atualizarPlaca()
+		task.wait(INTERVALO_ATUALIZACAO_GLOBAL)
+	end
+end)
+
+-- Garante salvar jogadores ao fechar servidor
+game:BindToClose(function()
+	for uid, rec in pairs(recordesLocais) do
+		if pendenteSalvar[uid] then
+			salvarRecordeNoDataStore(rec)
+			pendenteSalvar[uid] = nil
+		end
+	end
+end)
+
+-- Publica o conjunto já montado como uma única unidade persistente no mapa
 modeloPersistente.Parent = Workspace
