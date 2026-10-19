@@ -7,6 +7,8 @@ local StarterGui = game:GetService("StarterGui")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
+local QuizConfig = require(ReplicatedStorage:WaitForChild("QuizConfig"))
+
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local screenGui = playerGui:WaitForChild("ScreenGui", 30) :: ScreenGui?
@@ -52,6 +54,7 @@ local ResetarClient = pastaRemotes:WaitForChild("ResetarClient") :: RemoteEvent
 local NotificarMensagem = pastaRemotes:WaitForChild("NotificarMensagem") :: RemoteEvent
 local SolicitarReset = pastaRemotes:WaitForChild("SolicitarReset") :: RemoteEvent
 local ObterEstadoRodada = pastaRemotes:WaitForChild("ObterEstadoRodada") :: RemoteFunction
+local DefinirModoJogo = pastaRemotes:WaitForChild(QuizConfig.NOME_REMOTE_MODO or "DefinirModoJogo", 15) :: RemoteEvent?
 
 local function getOrCreateTextLabel(name: string): TextLabel
 	local label = screenGui:FindFirstChild(name)
@@ -173,6 +176,299 @@ local resetScale = (reset:FindFirstChildOfClass("UIScale") or Instance.new("UISc
 resetScale.Scale = 1
 resetScale.Parent = reset
 
+local somPergunta = (screenGui:FindFirstChild("SomPerguntaAparecer") or Instance.new("Sound")) :: Sound
+somPergunta.Name = "SomPerguntaAparecer"
+somPergunta.SoundId = "rbxassetid://9069609200"
+somPergunta.Volume = 0.65
+somPergunta.Parent = screenGui
+
+local somAcerto = (screenGui:FindFirstChild("SomAcertoQuiz") or Instance.new("Sound")) :: Sound
+somAcerto.Name = "SomAcertoQuiz"
+somAcerto.SoundId = "rbxassetid://6026987457"
+somAcerto.Volume = 0.7
+somAcerto.Parent = screenGui
+
+local somErro = (screenGui:FindFirstChild("SomErroQuiz") or Instance.new("Sound")) :: Sound
+somErro.Name = "SomErroQuiz"
+somErro.SoundId = "rbxassetid://9069611299"
+somErro.Volume = 0.6
+somErro.Parent = screenGui
+
+local somClique = (screenGui:FindFirstChild("SomCliqueQuiz") or Instance.new("Sound")) :: Sound
+somClique.Name = "SomCliqueQuiz"
+somClique.SoundId = "rbxassetid://6895079853"
+somClique.Volume = 0.55
+somClique.Parent = screenGui
+
+local modalExistente = screenGui:FindFirstChild("ModalSelecaoModo")
+if modalExistente then
+	modalExistente:Destroy()
+end
+
+local modal = Instance.new("Frame")
+modal.Name = "ModalSelecaoModo"
+modal.Size = UDim2.fromScale(1, 1)
+modal.BackgroundColor3 = Color3.fromRGB(8, 14, 25)
+modal.BackgroundTransparency = 0.35
+modal.BorderSizePixel = 0
+modal.Active = true
+modal.ZIndex = 45
+modal.Visible = false
+modal.Parent = screenGui
+
+local card = Instance.new("Frame")
+card.Name = "ModalCard"
+card.AnchorPoint = Vector2.new(0.5, 0.5)
+card.Position = UDim2.fromScale(0.5, 0.5)
+card.Size = UDim2.new(0.88, 0, 0.82, 0)
+card.BackgroundColor3 = Color3.fromRGB(15, 23, 40)
+card.BackgroundTransparency = 0.05
+card.BorderSizePixel = 0
+card.ZIndex = 46
+card.Parent = modal
+
+local cardConstraint = Instance.new("UISizeConstraint")
+cardConstraint.MinSize = Vector2.new(310, 380)
+cardConstraint.MaxSize = Vector2.new(680, 480)
+cardConstraint.Parent = card
+
+local cardCorner = Instance.new("UICorner")
+cardCorner.CornerRadius = UDim.new(0, 18)
+cardCorner.Parent = card
+
+local cardStroke = Instance.new("UIStroke")
+cardStroke.Color = Color3.fromRGB(255, 204, 60)
+cardStroke.Thickness = 2.5
+cardStroke.Parent = card
+
+local cardScale = Instance.new("UIScale")
+cardScale.Name = "CardScale"
+cardScale.Scale = 1
+cardScale.Parent = card
+
+local modalTitle = Instance.new("TextLabel")
+modalTitle.Name = "Title"
+modalTitle.Size = UDim2.new(1, -24, 0, 36)
+modalTitle.Position = UDim2.fromOffset(12, 12)
+modalTitle.BackgroundTransparency = 1
+modalTitle.Font = Enum.Font.GothamBlack
+modalTitle.Text = "🎮 ESCOLHA SEU MODO DE JOGO 🎮"
+modalTitle.TextColor3 = Color3.fromRGB(255, 222, 105)
+modalTitle.TextSize = 22
+modalTitle.TextScaled = true
+modalTitle.ZIndex = 47
+modalTitle.Parent = card
+
+local modalTitleConstraint = Instance.new("UITextSizeConstraint")
+modalTitleConstraint.MinTextSize = 16
+modalTitleConstraint.MaxTextSize = 25
+modalTitleConstraint.Parent = modalTitle
+
+local modalSubtitle = Instance.new("TextLabel")
+modalSubtitle.Name = "Subtitle"
+modalSubtitle.Size = UDim2.new(1, -24, 0, 24)
+modalSubtitle.Position = UDim2.fromOffset(12, 48)
+modalSubtitle.BackgroundTransparency = 1
+modalSubtitle.Font = Enum.Font.GothamMedium
+modalSubtitle.Text = "Selecione como deseja jogar antes de iniciar o tutorial:"
+modalSubtitle.TextColor3 = Color3.fromRGB(195, 215, 240)
+modalSubtitle.TextSize = 14
+modalSubtitle.TextScaled = true
+modalSubtitle.ZIndex = 47
+modalSubtitle.Parent = card
+
+local modalSubConstraint = Instance.new("UITextSizeConstraint")
+modalSubConstraint.MinTextSize = 12
+modalSubConstraint.MaxTextSize = 15
+modalSubConstraint.Parent = modalSubtitle
+
+local container = Instance.new("Frame")
+container.Name = "CardsContainer"
+container.Size = UDim2.new(1, -28, 1, -86)
+container.Position = UDim2.fromOffset(14, 76)
+container.BackgroundTransparency = 1
+container.ZIndex = 47
+container.Parent = card
+
+local function criarCardOpcao(nome: string, xPos: number, corBorda: Color3, corFundo: Color3, icone: string, titulo: string, badge: string, desc: string, textoBtn: string, corBtn: Color3, textoCorBtn: Color3): TextButton
+	local optFrame = Instance.new("Frame")
+	optFrame.Name = nome
+	optFrame.Size = UDim2.new(0.485, 0, 1, 0)
+	optFrame.Position = UDim2.new(xPos, 0, 0, 0)
+	optFrame.BackgroundColor3 = corFundo
+	optFrame.BackgroundTransparency = 0.12
+	optFrame.BorderSizePixel = 0
+	optFrame.ZIndex = 48
+	optFrame.Parent = container
+
+	local optCorner = Instance.new("UICorner")
+	optCorner.CornerRadius = UDim.new(0, 14)
+	optCorner.Parent = optFrame
+
+	local optStroke = Instance.new("UIStroke")
+	optStroke.Color = corBorda
+	optStroke.Thickness = 2
+	optStroke.Parent = optFrame
+
+	local optTitle = Instance.new("TextLabel")
+	optTitle.Name = "OptTitle"
+	optTitle.Size = UDim2.new(1, -16, 0, 30)
+	optTitle.Position = UDim2.fromOffset(8, 8)
+	optTitle.BackgroundTransparency = 1
+	optTitle.Font = Enum.Font.GothamBlack
+	optTitle.Text = icone .. " " .. titulo
+	optTitle.TextColor3 = corBorda
+	optTitle.TextSize = 17
+	optTitle.TextScaled = true
+	optTitle.ZIndex = 49
+	optTitle.Parent = optFrame
+
+	local optBadge = Instance.new("TextLabel")
+	optBadge.Name = "OptBadge"
+	optBadge.Size = UDim2.new(1, -16, 0, 20)
+	optBadge.Position = UDim2.fromOffset(8, 38)
+	optBadge.BackgroundTransparency = 1
+	optBadge.Font = Enum.Font.GothamBold
+	optBadge.Text = badge
+	optBadge.TextColor3 = Color3.fromRGB(255, 235, 150)
+	optBadge.TextSize = 12
+	optBadge.TextScaled = true
+	optBadge.ZIndex = 49
+	optBadge.Parent = optFrame
+
+	local optDesc = Instance.new("TextLabel")
+	optDesc.Name = "OptDesc"
+	optDesc.Size = UDim2.new(1, -20, 1, -114)
+	optDesc.Position = UDim2.fromOffset(10, 62)
+	optDesc.BackgroundTransparency = 1
+	optDesc.Font = Enum.Font.GothamMedium
+	optDesc.Text = desc
+	optDesc.TextColor3 = Color3.fromRGB(225, 235, 250)
+	optDesc.TextSize = 13
+	optDesc.TextWrapped = true
+	optDesc.TextXAlignment = Enum.TextXAlignment.Left
+	optDesc.TextYAlignment = Enum.TextYAlignment.Top
+	optDesc.ZIndex = 49
+	optDesc.Parent = optFrame
+
+	local optBtn = Instance.new("TextButton")
+	optBtn.Name = "BtnEscolher"
+	optBtn.Size = UDim2.new(1, -20, 0, 42)
+	optBtn.Position = UDim2.new(0, 10, 1, -48)
+	optBtn.BackgroundColor3 = corBtn
+	optBtn.BorderSizePixel = 0
+	optBtn.AutoButtonColor = false
+	optBtn.Font = Enum.Font.GothamBlack
+	optBtn.Text = textoBtn
+	optBtn.TextColor3 = textoCorBtn
+	optBtn.TextSize = 15
+	optBtn.TextScaled = true
+	optBtn.ZIndex = 50
+	optBtn.Parent = optFrame
+
+	local btnCorner = Instance.new("UICorner")
+	btnCorner.CornerRadius = UDim.new(0, 10)
+	btnCorner.Parent = optBtn
+
+	local btnStroke = Instance.new("UIStroke")
+	btnStroke.Color = Color3.fromRGB(255, 255, 255)
+	btnStroke.Transparency = 0.5
+	btnStroke.Thickness = 1.5
+	btnStroke.Parent = optBtn
+
+	local btnScale = Instance.new("UIScale")
+	btnScale.Scale = 1
+	btnScale.Parent = optBtn
+
+	optBtn.MouseEnter:Connect(function()
+		TweenService:Create(btnScale, TweenInfo.new(0.12), { Scale = 1.04 }):Play()
+	end)
+	optBtn.MouseLeave:Connect(function()
+		TweenService:Create(btnScale, TweenInfo.new(0.12), { Scale = 1.0 }):Play()
+	end)
+
+	return optBtn
+end
+
+local btnCom = criarCardOpcao(
+	"OpcaoComCronometro",
+	0,
+	Color3.fromRGB(255, 195, 55),
+	Color3.fromRGB(28, 42, 68),
+	"⏱️",
+	"COM CRONÔMETRO",
+	"[ 🏆 RANKING GLOBAL ]",
+	"• 10 minutos para concluir o quiz\n• Cronômetro visível no topo da tela\n• Seus acertos e tempo disputam o Top 10 Mundial!\n• Desafie seus amigos e bata recordes!",
+	"JOGAR COM CRONÔMETRO",
+	Color3.fromRGB(255, 185, 45),
+	Color3.fromRGB(15, 20, 35)
+)
+
+local btnSem = criarCardOpcao(
+	"OpcaoSemCronometro",
+	0.515,
+	Color3.fromRGB(50, 220, 175),
+	Color3.fromRGB(18, 45, 52),
+	"🎯",
+	"SEM CRONÔMETRO",
+	"[ 🌟 MODO LIVRE ]",
+	"• Jogue no seu próprio ritmo\n• Sem limite de tempo para responder\n• Cronômetro oculto no topo da tela\n• Ideal para aprender e praticar!",
+	"JOGAR SEM CRONÔMETRO",
+	Color3.fromRGB(45, 195, 150),
+	Color3.fromRGB(10, 25, 25)
+)
+
+local modalAberto = false
+local function mostrarModalModo()
+	if modalAberto then
+		return
+	end
+	modalAberto = true
+	modal.Visible = true
+	cardScale.Scale = 0.7
+	modal.BackgroundTransparency = 1
+	TweenService:Create(modal, TweenInfo.new(0.25), { BackgroundTransparency = 0.35 }):Play()
+	TweenService:Create(cardScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { Scale = 1.0 }):Play()
+end
+
+local function fecharModalModo()
+	if not modalAberto then
+		return
+	end
+	modalAberto = false
+	local t = TweenService:Create(cardScale, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.In), { Scale = 0.7 })
+	TweenService:Create(modal, TweenInfo.new(0.2), { BackgroundTransparency = 1 }):Play()
+	t:Play()
+	t.Completed:Wait()
+	modal.Visible = false
+	cardScale.Scale = 1.0
+end
+
+local function escolherModo(comCronometro: boolean)
+	pcall(function() somClique:Play() end)
+	if DefinirModoJogo then
+		DefinirModoJogo:FireServer(comCronometro)
+	end
+	player:SetAttribute("ModoComCronometro", comCronometro)
+	fecharModalModo()
+	if comCronometro then
+		timerLabel.Visible = true
+		mostrarToast("Modo Ranqueado Ativado! 10 minutos de prova.", Color3.fromRGB(255, 215, 90))
+	else
+		timerLabel.Visible = false
+		statusLabel.Text = "MODO LIVRE · SEM CRONÔMETRO"
+		statusLabel.TextColor3 = Color3.fromRGB(120, 235, 175)
+		mostrarToast("Modo Livre Ativado! Jogue no seu próprio ritmo.", Color3.fromRGB(120, 235, 175))
+	end
+end
+
+btnCom.Activated:Connect(function()
+	escolherModo(true)
+end)
+btnSem.Activated:Connect(function()
+	escolherModo(false)
+end)
+
 local function formatarTempo(segundos: number): string
 	local totalMilissegundos = math.floor(math.max(0, segundos) * 1000 + 0.5)
 	local minutos = math.floor(totalMilissegundos / 60000)
@@ -196,6 +492,20 @@ local function renderizarTempoCongelado(): boolean
 end
 
 local function aplicarEstadoRodada(dados: any)
+	local modoComCronometro = player:GetAttribute("ModoComCronometro")
+	if modoComCronometro == false then
+		timerLabel.Visible = false
+		local tentativa = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+		local fase = typeof(dados) == "table" and dados.Fase or "Tutorial"
+		if fase == "Ativa" then
+			statusLabel.Text = string.format("MODO LIVRE · RODADA %d", tentativa)
+		else
+			statusLabel.Text = "MODO LIVRE · SEM CRONÔMETRO"
+		end
+		statusLabel.TextColor3 = Color3.fromRGB(120, 235, 175)
+		return
+	end
+	timerLabel.Visible = true
 	if renderizarTempoCongelado() then
 		return
 	end
@@ -272,12 +582,34 @@ local function resetarCoresBotoes()
 		button.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
 		button.AutoButtonColor = true
 		button.Active = true
+		button.TextTransparency = 0
+		button.BackgroundTransparency = 0
 	end
 end
 
+local frameScale = (frame:FindFirstChild("FrameQuizScale") or Instance.new("UIScale")) :: UIScale
+frameScale.Name = "FrameQuizScale"
+frameScale.Scale = 1
+frameScale.Parent = frame
+
 local respondeuAtual = false
+local fecharAnimando = false
 local function fecharInterface()
+	if not frame.Visible or fecharAnimando then
+		frame.Visible = false
+		respondeuAtual = false
+		resetarCoresBotoes()
+		return
+	end
+	fecharAnimando = true
+	local tween = TweenService:Create(frameScale, TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.EasingDirection.In), {
+		Scale = 0.55,
+	})
+	tween:Play()
+	tween.Completed:Wait()
 	frame.Visible = false
+	frameScale.Scale = 1
+	fecharAnimando = false
 	respondeuAtual = false
 	resetarCoresBotoes()
 end
@@ -378,8 +710,49 @@ AbrirQuiz.OnClientEvent:Connect(function(dados: any)
 		local text = dados.Alternativas[index]
 		button.Visible = typeof(text) == "string"
 		button.Text = typeof(text) == "string" and text or ""
+		button.TextTransparency = 1
+		button.BackgroundTransparency = 1
 	end
+
+	-- Efeito sonoro imersivo de abertura da pergunta
+	pcall(function() somPergunta:Play() end)
+
+	-- Estado inicial para pop-in suave e elástico
+	frameScale.Scale = 0.62
+	frame.Position = UDim2.fromScale(0.5, 0.58)
+	perguntaLabel.TextTransparency = 1
 	frame.Visible = true
+
+	-- Animação Back-Out da janela
+	TweenService:Create(frameScale, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Scale = 1.0,
+	}):Play()
+	TweenService:Create(frame, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+		Position = UDim2.fromScale(0.5, 0.53),
+	}):Play()
+
+	-- Fade-in do enunciado
+	TweenService:Create(perguntaLabel, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		TextTransparency = 0,
+	}):Play()
+
+	-- Entrada escalonada dos 3 botões de resposta
+	for index = 1, #botoesResposta do
+		local button = botoesResposta[index]
+		if button.Visible then
+			local finalY = 0.30 + (index - 1) * 0.21
+			button.Position = UDim2.new(0.5, 0, finalY + 0.04, 0)
+			task.delay(0.07 * index, function()
+				if frame.Visible then
+					TweenService:Create(button, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+						Position = UDim2.new(0.5, 0, finalY, 0),
+						BackgroundTransparency = 0,
+						TextTransparency = 0,
+					}):Play()
+				end
+			end)
+		end
+	end
 end)
 
 for index, button in ipairs(botoesResposta) do
@@ -411,8 +784,10 @@ for index, button in ipairs(botoesResposta) do
 		end
 
 		if resultado.Acertou then
+			pcall(function() somAcerto:Play() end)
 			button.BackgroundColor3 = Color3.fromRGB(55, 180, 104)
 		else
+			pcall(function() somErro:Play() end)
 			button.BackgroundColor3 = Color3.fromRGB(204, 69, 78)
 			local correctIndex = tonumber(resultado.IndiceCorreto)
 			if correctIndex and botoesResposta[correctIndex] then
@@ -426,6 +801,13 @@ end
 
 FimDeRodada.OnClientEvent:Connect(function(dados: any)
 	fecharInterface()
+	local modoComCronometro = player:GetAttribute("ModoComCronometro")
+	if modoComCronometro == false then
+		timerLabel.Visible = false
+		statusLabel.Text = "MODO LIVRE · SEM CRONÔMETRO"
+		statusLabel.TextColor3 = Color3.fromRGB(120, 235, 175)
+		return
+	end
 	if renderizarTempoCongelado() then
 		if typeof(dados) ~= "table" or dados.Individual ~= true then
 			faseAtual = "Intervalo"
@@ -448,6 +830,11 @@ FimDeRodada.OnClientEvent:Connect(function(dados: any)
 end)
 
 RunService.Heartbeat:Connect(function()
+	local modoComCronometro = player:GetAttribute("ModoComCronometro")
+	if modoComCronometro == false then
+		timerLabel.Visible = false
+		return
+	end
 	if faseAtual ~= "Ativa" then
 		return
 	end
@@ -549,5 +936,37 @@ task.spawn(function()
 	end)
 	if ok then
 		atualizarEstado(dados)
+	end
+end)
+
+-- Sincroniza visibilidade do HUD conforme escolha do modo
+local function observarModo()
+	local modo = player:GetAttribute("ModoComCronometro")
+	if modo == false then
+		timerLabel.Visible = false
+		if faseAtual == "Ativa" then
+			local tentativa = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+			statusLabel.Text = string.format("MODO LIVRE · RODADA %d", tentativa)
+		else
+			statusLabel.Text = "MODO LIVRE · SEM CRONÔMETRO"
+		end
+		statusLabel.TextColor3 = Color3.fromRGB(120, 235, 175)
+	elseif modo == true then
+		timerLabel.Visible = true
+	end
+end
+player:GetAttributeChangedSignal("ModoComCronometro"):Connect(observarModo)
+observarModo()
+
+if DefinirModoJogo then
+	DefinirModoJogo.OnClientEvent:Connect(function()
+		mostrarModalModo()
+	end)
+end
+
+task.defer(function()
+	task.wait(0.3)
+	if player:GetAttribute("ModoComCronometro") == nil then
+		mostrarModalModo()
 	end
 end)

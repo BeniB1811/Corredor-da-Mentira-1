@@ -16,6 +16,8 @@ local QuizConfig = {
 	NOME_BANCO_QUESTOES = "QuizBancoQuestoes",
 	NOME_ATRIBUTO_PORTAO_RECOMPENSAS = "IsRewardGate",
 	NOME_BOTAO_RESET = "Botão de resetar pontos",
+	NOME_REMOTE_MODO = "DefinirModoJogo",
+	TOPICO_MESSAGING_RANKING = "QuizLeaderboardGlobalUpdate",
 }
 
 return table.freeze(QuizConfig)

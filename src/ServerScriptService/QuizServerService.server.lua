@@ -60,6 +60,17 @@ local ResetarClient = remote("ResetarClient", "RemoteEvent") :: RemoteEvent
 local NotificarMensagem = remote("NotificarMensagem", "RemoteEvent") :: RemoteEvent
 local SolicitarReset = remote("SolicitarReset", "RemoteEvent") :: RemoteEvent
 local ObterEstadoRodada = remote("ObterEstadoRodada", "RemoteFunction") :: RemoteFunction
+local DefinirModoJogo = remote(QuizConfig.NOME_REMOTE_MODO or "DefinirModoJogo", "RemoteEvent") :: RemoteEvent
+
+DefinirModoJogo.OnServerEvent:Connect(function(player: Player, comCronometro: any)
+	local modo = comCronometro == true
+	player:SetAttribute("ModoComCronometro", modo)
+	if modo then
+		notificar(player, "Modo RANQUEADO: Com cronômetro de 10 min e participação no Ranking Global!", Color3.fromRGB(255, 215, 80))
+	else
+		notificar(player, "Modo LIVRE: Jogue no seu próprio ritmo, sem tempo limite e sem cronômetro!", Color3.fromRGB(120, 230, 160))
+	end
+end)
 
 local FASE_TUTORIAL = "Tutorial"
 local FASE_PREPARACAO = "Preparando"
@@ -288,12 +299,19 @@ local function resetarTentativa(player: Player, contarNovaTentativa: boolean?, i
 	player:SetAttribute("TempoConclusaoQuiz", nil)
 	player:SetAttribute("TempoRestanteCongeladoQuiz", nil)
 	if fase == FASE_ATIVA and participantes[player] == true then
+		local comCronometro = player:GetAttribute("ModoComCronometro") == true
 		local agoraServidor = inicioServidor or Workspace:GetServerTimeNow()
 		inicioTentativaTimestamp[player] = agoraServidor
-		fimTentativaTimestamp[player] = agoraServidor + QuizConfig.DURACAO_RODADA_SEGUNDOS
-		player:SetAttribute("InicioTentativaQuiz", agoraServidor)
-		player:SetAttribute("FimTentativaQuiz", fimTentativaTimestamp[player])
-		fimRodadaTimestamp = math.max(fimRodadaTimestamp, fimTentativaTimestamp[player])
+		if comCronometro then
+			fimTentativaTimestamp[player] = agoraServidor + QuizConfig.DURACAO_RODADA_SEGUNDOS
+			player:SetAttribute("InicioTentativaQuiz", agoraServidor)
+			player:SetAttribute("FimTentativaQuiz", fimTentativaTimestamp[player])
+			fimRodadaTimestamp = math.max(fimRodadaTimestamp, fimTentativaTimestamp[player])
+		else
+			fimTentativaTimestamp[player] = nil
+			player:SetAttribute("InicioTentativaQuiz", nil)
+			player:SetAttribute("FimTentativaQuiz", nil)
+		end
 	else
 		inicioTentativaTimestamp[player] = nil
 		fimTentativaTimestamp[player] = nil
@@ -393,6 +411,11 @@ local function iniciarQuiz(player: Player, materia: string, nivel: number, nomeP
 	local tutorial = materia == "Geografia" and nivel == 0
 	if tutorial then
 		if tutorialConcluido[player] then
+			return
+		end
+		if player:GetAttribute("ModoComCronometro") == nil then
+			DefinirModoJogo:FireClient(player)
+			notificar(player, "Escolha seu modo de jogo antes de iniciar o tutorial!", Color3.fromRGB(255, 210, 90))
 			return
 		end
 		if fase == FASE_ATIVA then
@@ -524,11 +547,12 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 	if not sessao or sessao.Respondido then
 		return { Aceito = false, Mensagem = "Não há uma questão ativa." }
 	end
+	local comCronometro = player:GetAttribute("ModoComCronometro") == true
+	local tempoEsgotado = comCronometro and (fimTentativaTimestamp[player] or 0) <= Workspace:GetServerTimeNow()
 	local disponivel = sessao.Tutorial
 		and (fase == FASE_TUTORIAL or fase == FASE_INTERVALO)
 		and not tutorialConcluido[player]
-		or (not sessao.Tutorial and fase == FASE_ATIVA and participantes[player] == true
-			and (fimTentativaTimestamp[player] or 0) > Workspace:GetServerTimeNow())
+		or (not sessao.Tutorial and fase == FASE_ATIVA and participantes[player] == true and not tempoEsgotado)
 	if not disponivel then
 		sessoes[player] = nil
 		return { Aceito = false, Mensagem = "A rodada não está aceitando respostas." }
@@ -556,19 +580,27 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 		and not tentativaAprovadaCongelada(player)
 	then
 		local agoraServidor = Workspace:GetServerTimeNow()
-		local inicioTentativa = inicioTentativaTimestamp[player]
-			or (tonumber(player:GetAttribute("InicioTentativaQuiz")) :: number?)
-			or inicioRodadaTimestamp
-		local fimTentativa = fimTentativaTimestamp[player]
-			or (tonumber(player:GetAttribute("FimTentativaQuiz")) :: number?)
-			or agoraServidor
-		player:SetAttribute("TempoConclusaoQuiz", math.max(0, agoraServidor - inicioTentativa))
-		player:SetAttribute("TempoRestanteCongeladoQuiz", math.max(0, fimTentativa - agoraServidor))
-		notificar(
-			player,
-			"Você alcançou 15 acertos. Os dois cronômetros e o tempo da leaderboard ficaram congelados até o reset.",
-			Color3.fromRGB(120, 235, 165)
-		)
+		if comCronometro then
+			local inicioTentativa = inicioTentativaTimestamp[player]
+				or (tonumber(player:GetAttribute("InicioTentativaQuiz")) :: number?)
+				or inicioRodadaTimestamp
+			local fimTentativa = fimTentativaTimestamp[player]
+				or (tonumber(player:GetAttribute("FimTentativaQuiz")) :: number?)
+				or agoraServidor
+			player:SetAttribute("TempoConclusaoQuiz", math.max(0, agoraServidor - inicioTentativa))
+			player:SetAttribute("TempoRestanteCongeladoQuiz", math.max(0, fimTentativa - agoraServidor))
+			notificar(
+				player,
+				"Você alcançou 15 acertos! Tempo congelado e enviado para o Ranking Global.",
+				Color3.fromRGB(120, 235, 165)
+			)
+		else
+			notificar(
+				player,
+				"Parabéns! Você alcançou 15 acertos e o Portão de Recompensas está liberado!",
+				Color3.fromRGB(120, 235, 165)
+			)
+		end
 	end
 
 	ControlarPorta:FireClient(player, sessao.NomePorta, true)
@@ -584,6 +616,7 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 			and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
 			and player:GetAttribute("TempoConclusaoQuiz") == nil
 			and (inicioTentativaTimestamp[player] or inicioRodadaTimestamp) > 0
+			and comCronometro
 		then
 			local inicioTentativa = inicioTentativaTimestamp[player] or inicioRodadaTimestamp
 			player:SetAttribute("TempoConclusaoQuiz", math.max(0, Workspace:GetServerTimeNow() - inicioTentativa))
@@ -1011,40 +1044,49 @@ iniciarRodada = function()
 			local agoraServidor = Workspace:GetServerTimeNow()
 			local proximaExpiracao = math.huge
 			local maiorPrazo = 0
+			local temParticipanteAtivo = false
 			for _, player in ipairs(Players:GetPlayers()) do
 				if participantes[player] == true then
-					local prazo = fimTentativaTimestamp[player] or 0
-					if prazo > agoraServidor then
-						proximaExpiracao = math.min(proximaExpiracao, prazo)
-						maiorPrazo = math.max(maiorPrazo, prazo)
-					else
-						participantes[player] = false
-						fimTentativaTimestamp[player] = nil
-						inicioTentativaTimestamp[player] = nil
-						player:SetAttribute("FimTentativaQuiz", nil)
-						player:SetAttribute("InicioTentativaQuiz", nil)
-						sessoes[player] = nil
-						fecharPortasTentativa(player)
-						if tentativaAprovadaCongelada(player) then
-							FimDeRodada:FireClient(player, {
-								Mensagem = "Tentativa congelada preservada. Use RESETAR para iniciar outra.",
-								Individual = true,
-								Concluida = true,
-							})
+					temParticipanteAtivo = true
+					local comCronometro = player:GetAttribute("ModoComCronometro") == true
+					if comCronometro then
+						local prazo = fimTentativaTimestamp[player] or 0
+						if prazo > agoraServidor then
+							proximaExpiracao = math.min(proximaExpiracao, prazo)
+							maiorPrazo = math.max(maiorPrazo, prazo)
 						else
-							FimDeRodada:FireClient(player, {
-								Mensagem = "Seu tempo acabou. Aguarde o próximo início para tentar de novo.",
-								Individual = true,
-							})
+							participantes[player] = false
+							fimTentativaTimestamp[player] = nil
+							inicioTentativaTimestamp[player] = nil
+							player:SetAttribute("FimTentativaQuiz", nil)
+							player:SetAttribute("InicioTentativaQuiz", nil)
+							sessoes[player] = nil
+							fecharPortasTentativa(player)
+							if tentativaAprovadaCongelada(player) then
+								FimDeRodada:FireClient(player, {
+									Mensagem = "Tentativa congelada preservada. Use RESETAR para iniciar outra.",
+									Individual = true,
+									Concluida = true,
+								})
+							else
+								FimDeRodada:FireClient(player, {
+									Mensagem = "Seu tempo acabou. Aguarde o próximo início para tentar de novo.",
+									Individual = true,
+								})
+							end
 						end
 					end
 				end
 			end
 			fimRodadaTimestamp = maiorPrazo
-			if proximaExpiracao == math.huge then
+			if not temParticipanteAtivo then
 				break
 			end
-			task.wait(math.min(0.25, math.max(0.01, proximaExpiracao - agoraServidor)))
+			if proximaExpiracao == math.huge then
+				task.wait(0.5)
+			else
+				task.wait(math.min(0.25, math.max(0.01, proximaExpiracao - agoraServidor)))
+			end
 		end
 		if fase ~= FASE_ATIVA or rodadaAtual ~= numeroRodada then
 			return
@@ -1080,6 +1122,7 @@ local function inicializarJogador(player: Player)
 	progresso[player] = { Materia = "Geografia", Nivel = 0 }
 	sessoes[player] = nil
 	decksQuestoes[player] = {}
+	player:SetAttribute("ModoComCronometro", nil)
 	player:SetAttribute("AcertosQuiz", 0)
 	player:SetAttribute("NumeroTentativaQuiz", 0)
 	player:SetAttribute("TempoConclusaoQuiz", nil)
@@ -1106,6 +1149,11 @@ local function inicializarJogador(player: Player)
 		end
 	end)
 	transmitirEstadoRodada()
+	task.delay(0.8, function()
+		if player.Parent == Players and player:GetAttribute("ModoComCronometro") == nil then
+			DefinirModoJogo:FireClient(player)
+		end
+	end)
 	if fase == FASE_ATIVA then
 		notificar(player, "A rodada já começou. Você participa a partir do próximo início.", Color3.fromRGB(255, 210, 90))
 	elseif tutorialConcluido[player] then

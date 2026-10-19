@@ -5,6 +5,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
 local DataStoreService = game:GetService("DataStoreService")
+local MessagingService = game:GetService("MessagingService")
 local RunService = game:GetService("RunService")
 
 local QuizConfig = require(ReplicatedStorage:WaitForChild("QuizConfig"))
@@ -18,9 +19,10 @@ local TAMANHO_PLACAR = Vector3.new(13, 9, 0.46)
 local MAX_JOGADORES = 10
 local NOME_MODELO_PERSISTENTE = "LeaderboardPersistentDisplay"
 
--- Nomes das chaves de DataStore
+-- Nomes das chaves de DataStore e Mensageria Global
 local NOME_ORDERED_STORE = "QuizRankingGlobal_v2"
 local NOME_STATS_STORE = "QuizPlayerStats_v2"
+local TOPICO_RANKING_GLOBAL = QuizConfig.TOPICO_MESSAGING_RANKING or "QuizLeaderboardGlobalUpdate"
 local INTERVALO_ATUALIZACAO_GLOBAL = 30 -- segundos entre consultas ao Top 10
 
 -- Fatores para combinar Acertos e Menor Tempo em um único inteiro ordenável:
@@ -123,6 +125,16 @@ local function salvarRecordeNoDataStore(recorde: RecordeJogador)
 			Acertos = recorde.Acertos,
 			Tempo = recorde.Tempo,
 			Timestamp = recorde.Timestamp,
+		})
+	end)
+
+	-- Propaga a atualização instantaneamente para todos os servidores via MessagingService
+	pcall(function()
+		MessagingService:PublishAsync(TOPICO_RANKING_GLOBAL, {
+			UserId = recorde.UserId,
+			Acertos = recorde.Acertos,
+			Tempo = recorde.Tempo,
+			Timestamp = os.time(),
 		})
 	end)
 end
@@ -296,7 +308,7 @@ title.Size = UDim2.new(1, -40, 0, 66)
 title.Position = UDim2.fromOffset(20, 16)
 title.BackgroundTransparency = 1
 title.Font = Enum.Font.GothamBlack
-title.Text = "CLASSIFICAÇÃO"
+title.Text = "🏆 RANKING GLOBAL 🏆"
 title.TextColor3 = Color3.fromRGB(255, 220, 105)
 title.TextSize = 38
 title.TextXAlignment = Enum.TextXAlignment.Left
@@ -313,7 +325,7 @@ subtitle.Size = UDim2.new(1, -40, 0, 32)
 subtitle.Position = UDim2.fromOffset(20, 76)
 subtitle.BackgroundTransparency = 1
 subtitle.Font = Enum.Font.GothamMedium
-subtitle.Text = "TOP 10 · RECORDES GLOBAIS"
+subtitle.Text = "TOP 10 · TODOS OS SERVIDORES"
 subtitle.TextColor3 = Color3.fromRGB(193, 207, 228)
 subtitle.TextSize = 20
 subtitle.TextXAlignment = Enum.TextXAlignment.Left
@@ -563,6 +575,11 @@ local function carregarRecordeJogador(player: Player)
 end
 
 local function verificarAtualizacaoRecorde(player: Player)
+	-- Apenas jogadores no Modo Com Cronômetro (Ranqueado) disputam a Leaderboard Global
+	if player:GetAttribute("ModoComCronometro") ~= true then
+		return
+	end
+
 	local userId = player.UserId
 	local recordeAtual = recordesLocais[userId]
 	if not recordeAtual then
@@ -636,6 +653,15 @@ end)
 for _, player in ipairs(Players:GetPlayers()) do
 	observarJogador(player)
 end
+
+-- Sincronização em tempo real entre todos os servidores via MessagingService
+pcall(function()
+	MessagingService:SubscribeAsync(TOPICO_RANKING_GLOBAL, function(mensagem)
+		task.delay(1.5, function()
+			atualizarPlaca()
+		end)
+	end)
+end)
 
 -- Ciclo de atualização global periódico
 task.spawn(function()
