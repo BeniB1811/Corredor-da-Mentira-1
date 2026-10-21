@@ -784,18 +784,162 @@ for nivel = 1, 10 do
 	end)
 end
 
+-- ==============================================================================
+-- INDICADOR 3D: FLECHA SOBRE O PORTÃO DE RECOMPENSAS AO ATINGIR 15 QUESTÕES
+-- ==============================================================================
+local modeloFlechaLocal: Model? = nil
+local conexaoAnimacaoFlecha: RBXScriptConnection? = nil
+
+local function removerFlechaRecompensas()
+	if conexaoAnimacaoFlecha then
+		conexaoAnimacaoFlecha:Disconnect()
+		conexaoAnimacaoFlecha = nil
+	end
+	if modeloFlechaLocal then
+		modeloFlechaLocal:Destroy()
+		modeloFlechaLocal = nil
+	end
+end
+
+local function criarFlechaRecompensas()
+	if modeloFlechaLocal then
+		return
+	end
+
+	-- Localiza a posição do Portão de Recompensas
+	local gatePart = Workspace:FindFirstChild(QuizConfig.NOME_PORTAO_RECOMPENSAS, true)
+	local posicaoBase = if gatePart and gatePart:IsA("BasePart")
+		then gatePart.Position + Vector3.new(0, gatePart.Size.Y * 0.5 + 4.5, 0)
+		else Vector3.new(405.025, 1058, 79.6)
+
+	local model = Instance.new("Model")
+	model.Name = "FlechaRecompensasLocal"
+
+	-- Corpo superior da seta (haste)
+	local haste = Instance.new("Part")
+	haste.Name = "Haste"
+	haste.Size = Vector3.new(1.4, 3.2, 1.4)
+	haste.Material = Enum.Material.Neon
+	haste.Color = Color3.fromRGB(255, 215, 0)
+	haste.Anchored = true
+	haste.CanCollide = false
+	haste.CanTouch = false
+	haste.CanQuery = false
+	haste.Parent = model
+
+	-- Ponta da seta apontando para baixo em direção ao portão
+	local ponta = Instance.new("WedgePart")
+	ponta.Name = "Ponta"
+	ponta.Size = Vector3.new(3.6, 2.6, 3.6)
+	ponta.Material = Enum.Material.Neon
+	ponta.Color = Color3.fromRGB(255, 230, 60)
+	ponta.Anchored = true
+	ponta.CanCollide = false
+	ponta.CanTouch = false
+	ponta.CanQuery = false
+	ponta.Parent = model
+
+	-- Luz brilhante para destacar a porta
+	local luz = Instance.new("PointLight")
+	luz.Name = "LuzDourada"
+	luz.Range = 28
+	luz.Brightness = 3.5
+	luz.Color = Color3.fromRGB(255, 220, 50)
+	luz.Parent = ponta
+
+	-- Billboard informativo no topo da seta
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "IndicadorBillboard"
+	bb.Size = UDim2.fromOffset(340, 80)
+	bb.StudsOffset = Vector3.new(0, 3.8, 0)
+	bb.AlwaysOnTop = true
+	bb.MaxDistance = 350
+	bb.Adornee = haste
+	bb.Parent = model
+
+	local banner = Instance.new("Frame")
+	banner.Size = UDim2.fromScale(1, 1)
+	banner.BackgroundColor3 = Color3.fromRGB(15, 24, 42)
+	banner.BackgroundTransparency = 0.15
+	banner.Parent = bb
+
+	local bannerCorner = Instance.new("UICorner")
+	bannerCorner.CornerRadius = UDim.new(0, 14)
+	bannerCorner.Parent = banner
+
+	local bannerStroke = Instance.new("UIStroke")
+	bannerStroke.Color = Color3.fromRGB(255, 215, 0)
+	bannerStroke.Thickness = 2.5
+	bannerStroke.Parent = banner
+
+	local labelAviso = Instance.new("TextLabel")
+	labelAviso.Size = UDim2.fromScale(1, 1)
+	labelAviso.BackgroundTransparency = 1
+	labelAviso.Font = Enum.Font.GothamBlack
+	labelAviso.Text = "⬇️ 🏆 RECOMPENSAS LIBERADAS! 🏆 ⬇️\nEntre para aproveitar seus prêmios!"
+	labelAviso.TextColor3 = Color3.fromRGB(255, 235, 90)
+	labelAviso.TextScaled = true
+	labelAviso.TextWrapped = true
+	labelAviso.Parent = banner
+
+	local labelPadding = Instance.new("UIPadding")
+	labelPadding.PaddingTop = UDim.new(0, 6)
+	labelPadding.PaddingBottom = UDim.new(0, 6)
+	labelPadding.PaddingLeft = UDim.new(0, 10)
+	labelPadding.PaddingRight = UDim.new(0, 10)
+	labelPadding.Parent = labelAviso
+
+	model.PrimaryPart = haste
+	model.Parent = Workspace
+	modeloFlechaLocal = model
+
+	-- Animação contínua: flutuação suave para cima e para baixo (bobbing) e rotação
+	local inicioTick = os.clock()
+	conexaoAnimacaoFlecha = RunService.RenderStepped:Connect(function()
+		if not modeloFlechaLocal or not haste or not ponta then
+			removerFlechaRecompensas()
+			return
+		end
+		local tempo = os.clock() - inicioTick
+		local oscilacaoY = math.sin(tempo * 3.5) * 0.9
+		local rotacao = (tempo * 1.6) % (math.pi * 2)
+
+		local centro = posicaoBase + Vector3.new(0, oscilacaoY, 0)
+		local cframeBase = CFrame.new(centro) * CFrame.Angles(0, rotacao, 0)
+
+		haste.CFrame = cframeBase * CFrame.new(0, 2.2, 0)
+		ponta.CFrame = cframeBase * CFrame.new(0, -0.6, 0) * CFrame.Angles(0, 0, math.pi)
+	end)
+end
+
+local function verificarFlechaRecompensas()
+	local pontos = player:GetAttribute("AcertosQuiz")
+	if typeof(pontos) == "number" and pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS then
+		if not modeloFlechaLocal then
+			criarFlechaRecompensas()
+		end
+	else
+		removerFlechaRecompensas()
+	end
+end
+
+player:GetAttributeChangedSignal("AcertosQuiz"):Connect(verificarFlechaRecompensas)
+
 player.CharacterAdded:Connect(function()
 	task.wait(0.2)
 	sincronizarPortasLocais()
+	verificarFlechaRecompensas()
 end)
 
 ResetarClient.OnClientEvent:Connect(function()
 	fecharInterface()
 	sincronizarPortasLocais()
+	removerFlechaRecompensas()
 end)
 
 task.defer(function()
 	sincronizarPortasLocais()
+	verificarFlechaRecompensas()
 end)
 
 AbrirQuiz.OnClientEvent:Connect(function(dados: any)

@@ -81,6 +81,7 @@ local tentativaManualPendenteInicio: { [Player]: boolean } = {}
 local tokenPreparacao = 0
 local participantes: { [Player]: boolean } = {}
 local tutorialConcluido: { [Player]: boolean } = {}
+local materiaInicial: { [Player]: string? } = {}
 local progresso: { [Player]: Progresso } = {}
 local sessoes: { [Player]: SessaoQuiz } = {}
 local decksQuestoes: { [Player]: { [string]: { [number]: { number } } } } = {}
@@ -268,6 +269,36 @@ local function teleportarParaNivel(player: Player, materia: string, nivel: numbe
 	character:PivotTo(alvo.CFrame * CFrame.new(0, 3.5, 4))
 end
 
+local function teleportarParaMeioDaSala(player: Player)
+	local character = player.Character
+	if not character then
+		return
+	end
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	local spawn = Workspace:FindFirstChildOfClass("SpawnLocation")
+	local cframeMeio: CFrame
+	if spawn then
+		cframeMeio = CFrame.lookAt(
+			Vector3.new(spawn.Position.X, spawn.Position.Y + 3.5, -20),
+			Vector3.new(spawn.Position.X, spawn.Position.Y + 3.5, 40)
+		)
+	else
+		cframeMeio = CFrame.lookAt(
+			Vector3.new(406.5, 1050, -20),
+			Vector3.new(406.5, 1050, 40)
+		)
+	end
+	character:PivotTo(cframeMeio)
+end
+
 local function fecharPortasTentativa(player: Player)
 	for nivel = 0, QuizConfig.NIVEL_FINAL_GEOGRAFIA do
 		ControlarPorta:FireClient(player, string.format("PortaNivel%d Geografia", nivel), false)
@@ -315,11 +346,13 @@ local function resetarTentativa(player: Player, contarNovaTentativa: boolean?, i
 	for nivel = 1, QuizConfig.NIVEL_FINAL_HISTORIA do
 		player:SetAttribute("QuizHistoriaFeito_Nivel" .. nivel, nil)
 	end
+	materiaInicial[player] = nil
 	if tutorialConcluido[player] then
 		player:SetAttribute("QuizFeito_Nivel0", true)
+		progresso[player] = nil
+	else
+		progresso[player] = { Materia = "Geografia", Nivel = 0 }
 	end
-	local nivelInicial = tutorialConcluido[player] and 1 or 0
-	progresso[player] = { Materia = "Geografia", Nivel = nivelInicial }
 	fecharPortasTentativa(player)
 end
 
@@ -420,11 +453,19 @@ local function iniciarQuiz(player: Player, materia: string, nivel: number, nomeP
 			return
 		end
 		local esperado = progresso[player]
-		if not esperado or esperado.Materia ~= materia or esperado.Nivel ~= nivel then
-			if esperado then
-				notificar(player, string.format("Responda primeiro %s, nível %d.", esperado.Materia, esperado.Nivel), Color3.fromRGB(255, 210, 90))
+		if not esperado then
+			if nivel == 1 and (materia == "Geografia" or materia == "História") then
+				materiaInicial[player] = materia
+				progresso[player] = { Materia = materia, Nivel = 1 }
+			else
+				notificar(player, "Escolha seu caminho: vá até o Nível 1 de Geografia ou de História para começar!", Color3.fromRGB(255, 210, 90))
+				return
 			end
-			return
+		else
+			if esperado.Materia ~= materia or esperado.Nivel ~= nivel then
+				notificar(player, string.format("Responda primeiro %s, nível %d.", esperado.Materia, esperado.Nivel), Color3.fromRGB(255, 210, 90))
+				return
+			end
 		end
 	end
 
@@ -602,55 +643,62 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 	local proximo = progresso[player]
 	if sessao.Tutorial then
 		tutorialConcluido[player] = true
-		progresso[player] = { Materia = "Geografia", Nivel = 1 }
-		notificar(player, "Tutorial concluído! A rodada começa quando todos terminarem.", Color3.fromRGB(90, 230, 150))
+		progresso[player] = nil
+		materiaInicial[player] = nil
+		notificar(player, "Tutorial concluído! Escolha seu caminho: vá até o Nível 1 de Geografia ou de História.", Color3.fromRGB(90, 230, 150))
+		task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
+			if player.Parent == Players then
+				teleportarParaMeioDaSala(player)
+			end
+		end)
 		tentarIniciarRodada()
 	elseif proximo and proximo.Materia == sessao.Materia and proximo.Nivel == sessao.Nivel then
-		local reiniciarPorPontuacaoInsuficiente = false
-		if sessao.Materia == "História"
-			and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
-			and player:GetAttribute("TempoConclusaoQuiz") == nil
-			and (inicioTentativaTimestamp[player] or inicioRodadaTimestamp) > 0
-			and comCronometro
-		then
-			local inicioTentativa = inicioTentativaTimestamp[player] or inicioRodadaTimestamp
-			player:SetAttribute("TempoConclusaoQuiz", math.max(0, Workspace:GetServerTimeNow() - inicioTentativa))
-		end
-		local finalDaTentativa = sessao.Materia == "História" and sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA
-		if finalDaTentativa and pontos < QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS then
-			reiniciarPorPontuacaoInsuficiente = true
-		end
-		local destino = proximoNivel(sessao.Materia, sessao.Nivel)
-		if reiniciarPorPontuacaoInsuficiente then
-			progresso[player] = { Materia = "Geografia", Nivel = 1 }
-		elseif sessao.Nivel == QuizConfig.NIVEL_FINAL_GEOGRAFIA and sessao.Materia == "Geografia" then
-			resetarPortasDeMateria(player, "História")
-		elseif sessao.Nivel == QuizConfig.NIVEL_FINAL_HISTORIA and sessao.Materia == "História" then
-			resetarPortasDeMateria(player, "Geografia")
-		end
-		if not reiniciarPorPontuacaoInsuficiente then
+		local primeira = materiaInicial[player] or "Geografia"
+		local segunda = if primeira == "Geografia" then "História" else "Geografia"
+		local finalPrimeira = sessao.Materia == primeira and sessao.Nivel == (if primeira == "Geografia" then QuizConfig.NIVEL_FINAL_GEOGRAFIA else QuizConfig.NIVEL_FINAL_HISTORIA)
+		local finalSegunda = sessao.Materia == segunda and sessao.Nivel == (if segunda == "Geografia" then QuizConfig.NIVEL_FINAL_GEOGRAFIA else QuizConfig.NIVEL_FINAL_HISTORIA)
+
+		if finalPrimeira then
+			-- Concluiu a primeira matéria! Transfere para o início da outra matéria
+			local destino = { Materia = segunda, Nivel = 1 }
 			progresso[player] = destino
-		end
-		if reiniciarPorPontuacaoInsuficiente then
-			local tentativaConcluida = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
-			task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
-				if player.Parent == Players
-					and fase == FASE_ATIVA
-					and participantes[player] == true
-					and (tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1) == tentativaConcluida
-				then
-					resetarTentativa(player, true)
-					task.defer(teleportarParaNivel, player, "Geografia", 1)
-					local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
-					notificar(player, string.format("Você terminou com %d/%d. São necessários %d acertos; nova rodada iniciada (rodada %d).", pontos, QuizConfig.MAX_ACERTOS, QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS, tentativaAtual), Color3.fromRGB(255, 190, 100))
-				end
-			end)
-		elseif destino.Nivel == 1 and destino.Materia ~= sessao.Materia then
+			resetarPortasDeMateria(player, segunda)
+			notificar(player, string.format("Você concluiu %s! Teletransportando para o início de %s...", primeira, segunda), Color3.fromRGB(100, 225, 255))
 			task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
 				if player.Parent == Players and fase == FASE_ATIVA and participantes[player] then
-					teleportarParaNivel(player, destino.Materia, destino.Nivel)
+					teleportarParaNivel(player, segunda, 1)
 				end
 			end)
+		elseif finalSegunda then
+			-- Concluiu a segunda matéria (todas as 20 fases do jogo finalizadas)
+			if player:GetAttribute("TempoConclusaoQuiz") == nil
+				and (inicioTentativaTimestamp[player] or inicioRodadaTimestamp) > 0
+				and comCronometro
+			then
+				local inicioTentativa = inicioTentativaTimestamp[player] or inicioRodadaTimestamp
+				player:SetAttribute("TempoConclusaoQuiz", math.max(0, Workspace:GetServerTimeNow() - inicioTentativa))
+			end
+
+			if pontos < QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS then
+				local tentativaConcluida = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+				task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
+					if player.Parent == Players
+						and fase == FASE_ATIVA
+						and participantes[player] == true
+						and (tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1) == tentativaConcluida
+					then
+						resetarTentativa(player, true)
+						teleportarParaMeioDaSala(player)
+						local tentativaAtual = tonumber(player:GetAttribute("NumeroTentativaQuiz")) or 1
+						notificar(player, string.format("Você terminou com %d/%d. São necessários %d acertos; nova tentativa iniciada (tentativa %d). Escolha onde começar!", pontos, QuizConfig.MAX_ACERTOS, QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS, tentativaAtual), Color3.fromRGB(255, 190, 100))
+					end
+				end)
+			else
+				notificar(player, "Parabéns! Você concluiu todas as 20 fases do jogo! Aproveite a Sala de Recompensas!", Color3.fromRGB(120, 255, 170))
+			end
+		else
+			-- Continua para a próxima fase da matéria atual
+			progresso[player] = { Materia = sessao.Materia, Nivel = sessao.Nivel + 1 }
 		end
 	end
 
@@ -878,8 +926,11 @@ local function processarReset(player: Player, matarPersonagem: boolean)
 			humanoid.Health = 0
 		end
 	else
-		local destino = tutorialConcluido[player] and 1 or 0
-		task.defer(teleportarParaNivel, player, "Geografia", destino)
+		if tutorialConcluido[player] then
+			task.defer(teleportarParaMeioDaSala, player)
+		else
+			task.defer(teleportarParaNivel, player, "Geografia", 0)
+		end
 	end
 end
 
@@ -939,8 +990,11 @@ DefinirModoJogo.OnServerEvent:Connect(function(player: Player, comCronometro: an
 		-- Reseta tudo: acertos, portas e tentativa
 		resetarTentativa(player, true)
 
-		local destino = tutorialConcluido[player] and 1 or 0
-		task.defer(teleportarParaNivel, player, "Geografia", destino)
+		if tutorialConcluido[player] then
+			task.defer(teleportarParaMeioDaSala, player)
+		else
+			task.defer(teleportarParaNivel, player, "Geografia", 0)
+		end
 
 		notificar(
 			player,
@@ -1092,8 +1146,8 @@ iniciarRodada = function()
 			end
 			tentativaManualPendenteInicio[player] = nil
 			resetarTentativa(player, false, inicioRodadaTimestamp)
-			progresso[player] = { Materia = "Geografia", Nivel = 1 }
-			teleportarParaNivel(player, "Geografia", 1)
+			teleportarParaMeioDaSala(player)
+			notificar(player, "A rodada começou! Vá até o Nível 1 de Geografia ou de História para começar.", Color3.fromRGB(255, 220, 90))
 		end
 	end
 	if not iniciouTentativa then
@@ -1202,13 +1256,21 @@ local function inicializarJogador(player: Player)
 		if resetComRespawnPendente[player] then
 			resetComRespawnPendente[player] = nil
 			if fase == FASE_ATIVA and participantes[player] then
-				task.delay(0.3, teleportarParaNivel, player, "Geografia", 1)
+				if tutorialConcluido[player] then
+					task.delay(0.3, teleportarParaMeioDaSala, player)
+				else
+					task.delay(0.3, teleportarParaNivel, player, "Geografia", 0)
+				end
 			elseif fase == FASE_INTERVALO and not tutorialConcluido[player] then
 				task.delay(0.3, teleportarParaNivel, player, "Geografia", 0)
 			end
 		elseif fase == FASE_ATIVA and participantes[player] then
 			resetarTentativa(player)
-			task.delay(0.3, teleportarParaNivel, player, "Geografia", 1)
+			if tutorialConcluido[player] then
+				task.delay(0.3, teleportarParaMeioDaSala, player)
+			else
+				task.delay(0.3, teleportarParaNivel, player, "Geografia", 0)
+			end
 		elseif fase == FASE_INTERVALO and not tutorialConcluido[player] then
 			task.delay(0.3, teleportarParaNivel, player, "Geografia", 0)
 		end
@@ -1234,6 +1296,7 @@ local function removerJogador(player: Player)
 	resetComRespawnPendente[player] = nil
 	tentativaManualPendenteInicio[player] = nil
 	progresso[player] = nil
+	materiaInicial[player] = nil
 	sessoes[player] = nil
 	decksQuestoes[player] = nil
 	ultimoAviso[player] = nil
