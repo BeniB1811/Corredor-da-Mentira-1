@@ -82,6 +82,7 @@ local tokenPreparacao = 0
 local participantes: { [Player]: boolean } = {}
 local tutorialConcluido: { [Player]: boolean } = {}
 local materiaInicial: { [Player]: string? } = {}
+local teleporte15AcertosFeito: { [Player]: boolean } = {}
 local progresso: { [Player]: Progresso } = {}
 local sessoes: { [Player]: SessaoQuiz } = {}
 local decksQuestoes: { [Player]: { [string]: { [number]: { number } } } } = {}
@@ -299,6 +300,36 @@ local function teleportarParaMeioDaSala(player: Player)
 	character:PivotTo(cframeMeio)
 end
 
+local function teleportarParaFrenteDoPortao(player: Player, distanciaBlocos: number?)
+	local character = player.Character
+	if not character then
+		return
+	end
+	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not root or not humanoid or humanoid.Health <= 0 then
+		return
+	end
+
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+
+	local dist = distanciaBlocos or 10
+	local gate = portaRecompensas or encontrarParte(QuizConfig.NOME_PORTAO_RECOMPENSAS)
+
+	local targetCFrame: CFrame
+	if gate then
+		local posPortao = gate.Position
+		-- O saguão principal fica no sentido de Z menor em relação ao portão (direção do spawn em Z = -29)
+		local posAlvo = Vector3.new(posPortao.X, 1049.5, posPortao.Z - dist)
+		targetCFrame = CFrame.lookAt(posAlvo, Vector3.new(posPortao.X, 1049.5, posPortao.Z))
+	else
+		targetCFrame = CFrame.lookAt(Vector3.new(405.025, 1049.5, 79.6 - dist), Vector3.new(405.025, 1049.5, 79.6))
+	end
+
+	character:PivotTo(targetCFrame)
+end
+
 local function fecharPortasTentativa(player: Player)
 	for nivel = 0, QuizConfig.NIVEL_FINAL_GEOGRAFIA do
 		ControlarPorta:FireClient(player, string.format("PortaNivel%d Geografia", nivel), false)
@@ -347,6 +378,7 @@ local function resetarTentativa(player: Player, contarNovaTentativa: boolean?, i
 		player:SetAttribute("QuizHistoriaFeito_Nivel" .. nivel, nil)
 	end
 	materiaInicial[player] = nil
+	teleporte15AcertosFeito[player] = nil
 	if tutorialConcluido[player] then
 		player:SetAttribute("QuizFeito_Nivel0", true)
 		progresso[player] = nil
@@ -609,10 +641,13 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 		atualizarLeaderstats(player, pontos)
 	end
 
+	local alcancou15QuestoesAgora = false
 	if not sessao.Tutorial
 		and pontos >= QuizConfig.ACERTOS_MINIMOS_PORTAO_RECOMPENSAS
-		and not tentativaAprovadaCongelada(player)
+		and not teleporte15AcertosFeito[player]
 	then
+		teleporte15AcertosFeito[player] = true
+		alcancou15QuestoesAgora = true
 		local agoraServidor = Workspace:GetServerTimeNow()
 		if comCronometro then
 			local inicioTentativa = inicioTentativaTimestamp[player]
@@ -639,6 +674,19 @@ local function enviarRespostaDoJogador(player: Player, indiceEscolhido: any)
 
 	-- A porta abre normalmente para a pessoa que respondeu (mesmo se errou a alternativa)
 	ControlarPorta:FireClient(player, sessao.NomePorta, true)
+
+	if alcancou15QuestoesAgora then
+		task.delay(QuizConfig.TEMPO_EXIBICAO_RESULTADO + 0.15, function()
+			if player.Parent == Players and (fase == FASE_ATIVA or not comCronometro) then
+				teleportarParaFrenteDoPortao(player, 10)
+				notificar(
+					player,
+					"Você completou 15 perguntas! Siga em frente para entrar na Sala de Recompensas!",
+					Color3.fromRGB(255, 225, 80)
+				)
+			end
+		end)
+	end
 
 	local proximo = progresso[player]
 	if sessao.Tutorial then
@@ -1239,6 +1287,8 @@ local function inicializarJogador(player: Player)
 	participantes[player] = false
 	tutorialConcluido[player] = false
 	progresso[player] = { Materia = "Geografia", Nivel = 0 }
+	materiaInicial[player] = nil
+	teleporte15AcertosFeito[player] = nil
 	sessoes[player] = nil
 	decksQuestoes[player] = {}
 	player:SetAttribute("ModoComCronometro", nil)
@@ -1297,6 +1347,7 @@ local function removerJogador(player: Player)
 	tentativaManualPendenteInicio[player] = nil
 	progresso[player] = nil
 	materiaInicial[player] = nil
+	teleporte15AcertosFeito[player] = nil
 	sessoes[player] = nil
 	decksQuestoes[player] = nil
 	ultimoAviso[player] = nil
