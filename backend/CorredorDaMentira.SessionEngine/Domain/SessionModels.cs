@@ -33,9 +33,11 @@ public sealed record PlayerSessionSnapshot(
     PlayerFlowState CurrentState,
     GameMode SelectedMode,
     bool IsTutorialCompleted,
+    bool IsQuizTimeClosed,
     int CorrectAnswersCount,
     int AttemptNumber,
     DateTimeOffset? AttemptStartedAtUtc,
+    DateTimeOffset? AttemptExpiresAtUtc,
     DateTimeOffset? RewardAreaExpiresAtUtc
 );
 
@@ -59,6 +61,14 @@ public sealed record QuestionValidationResult(
     int UpdatedScore,
     PlayerFlowState UpdatedState,
     string FeedbackMessage
+);
+
+public sealed record QuizAttemptExpirationEvent(
+    long PlayerId,
+    bool WasAttemptInvalidated,
+    int FinalScore,
+    DateTimeOffset ExpiredAtUtc,
+    string NotificationMessage
 );
 
 public sealed record RewardAreaExpirationEvent(

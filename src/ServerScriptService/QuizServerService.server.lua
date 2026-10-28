@@ -47,6 +47,8 @@ type PlayerSession = {
 	AttemptStartTimestamp: number?,
 	AttemptEndTimestamp: number?,
 	AttemptTimerToken: number,
+	AllQuestionsCompleted: boolean,
+	QuizTimeClosed: boolean,
 	RewardQualifiedTeleportDone: boolean,
 	RewardAreaEndTimestamp: number?,
 	RewardTimerToken: number,
@@ -245,9 +247,21 @@ local function isTimedModeEnabled(player: Player): boolean
 	return player:GetAttribute("ModoComCronometro") == true
 end
 
-local function isFrozenApprovedAttempt(player: Player): boolean
-	return typeof(player:GetAttribute("TempoRestanteCongeladoQuiz")) == "number"
-		and getPlayerScore(player) >= QuizConfig.REWARD_MIN_SCORE
+local function isQuizCountdownFinalized(player: Player, session: PlayerSession): boolean
+	return session.AllQuestionsCompleted
+		or session.QuizTimeClosed
+		or typeof(player:GetAttribute("TempoRestanteCongeladoQuiz")) == "number"
+end
+
+local function freezeQuizCountdownIfRunning(player: Player, session: PlayerSession)
+	if player:GetAttribute("TempoRestanteCongeladoQuiz") ~= nil then
+		return
+	end
+	if not isTimedModeEnabled(player) or not session.AttemptEndTimestamp then
+		return
+	end
+	local remaining = math.max(0, session.AttemptEndTimestamp - Workspace:GetServerTimeNow())
+	player:SetAttribute("TempoRestanteCongeladoQuiz", remaining)
 end
 
 local function updateLeaderstats(player: Player, score: number)
@@ -487,39 +501,72 @@ local function startQuizAttemptCountdown(player: Player, session: PlayerSession)
 	session.AttemptEndTimestamp = deadline
 	player:SetAttribute("InicioTentativaQuiz", nowServer)
 	player:SetAttribute("FimTentativaQuiz", deadline)
+	syncClientSessionState(player, session)
 
 	task.spawn(function()
 		while player.Parent == Players and playerSessions[player] == session and session.AttemptTimerToken == currentToken do
-			if isFrozenApprovedAttempt(player) then
+			if isQuizCountdownFinalized(player, session) then
 				return
 			end
 			local remaining = deadline - Workspace:GetServerTimeNow()
 			if remaining <= 0 then
 				break
 			end
-			task.wait(math.clamp(remaining, 0.1, 1.0))
+			task.wait(math.clamp(remaining, 0.1, 0.5))
 		end
 
 		if player.Parent ~= Players or playerSessions[player] ~= session or session.AttemptTimerToken ~= currentToken then
 			return
 		end
-		if isFrozenApprovedAttempt(player) or not isTimedModeEnabled(player) then
+		if isQuizCountdownFinalized(player, session) or not isTimedModeEnabled(player) then
 			return
 		end
 
-		-- Prazo da tentativa ranqueada esgotado antes dos 15 acertos: reinicia tentativa com segurança
-		resetPlayerAttempt(player, session, true)
-		FimDeRodada:FireClient(player, {
-			Mensagem = "Tempo esgotado. Nova tentativa iniciada no saguão principal.",
-			Individual = true,
-		})
-		notifyPlayer(
-			player,
-			"O tempo da tentativa esgotou. Uma nova tentativa foi iniciada.",
-			COLOR_NOTICE_WARNING,
-			true
-		)
-		task.defer(teleportToMainLobby, player)
+		local currentScore = getPlayerScore(player)
+		if currentScore < QuizConfig.REWARD_MIN_SCORE then
+			-- Tempo esgotado sem atingir as 15 questões: invalida a tentativa e retorna ao saguão
+			resetPlayerAttempt(player, session, true)
+			FimDeRodada:FireClient(player, {
+				Mensagem = "Tempo esgotado sem atingir 15 acertos. Tentativa invalidada.",
+				Individual = true,
+			})
+			notifyPlayer(
+				player,
+				string.format(
+					"Tempo de 10 minutos esgotado com %d/%d acertos (mínimo %d). Tentativa invalidada.",
+					currentScore,
+					QuizConfig.MAX_SCORE,
+					QuizConfig.REWARD_MIN_SCORE
+				),
+				COLOR_NOTICE_DANGER,
+				true
+			)
+			task.defer(teleportToMainLobby, player)
+		else
+			-- Jogador já atingiu >= 15 acertos dentro dos 10 minutos: encerra novas respostas e preserva acesso às recompensas
+			session.QuizTimeClosed = true
+			session.ActiveQuestion = nil
+			session.Progress = nil
+			player:SetAttribute("QuizTimeClosed", true)
+			player:SetAttribute("TempoRestanteCongeladoQuiz", 0)
+			FimDeRodada:FireClient(player, {
+				Mensagem = string.format("Tempo das questões encerrado (%d/%d acertos). Recompensas liberadas.", currentScore, QuizConfig.MAX_SCORE),
+				Individual = true,
+			})
+			notifyPlayer(
+				player,
+				string.format(
+					"Tempo das questões encerrado (%d/%d acertos). Dirija-se à Área de Recompensas.",
+					currentScore,
+					QuizConfig.MAX_SCORE
+				),
+				COLOR_NOTICE_SUCCESS,
+				true
+			)
+			if session.State ~= PLAYER_STATES.IN_REWARD_AREA then
+				task.defer(teleportToRewardGateApproach, player, QuizConfig.REWARD_APPROACH_DISTANCE_STUDS)
+			end
+		end
 	end)
 end
 
@@ -538,9 +585,12 @@ resetPlayerAttempt = function(player: Player, session: PlayerSession, incrementA
 	session.ActiveQuestion = nil
 	session.QuestionDecks = {}
 	session.StartingSubject = nil
+	session.AllQuestionsCompleted = false
+	session.QuizTimeClosed = false
 	session.RewardQualifiedTeleportDone = false
 
 	player:SetAttribute("AcertosQuiz", 0)
+	player:SetAttribute("QuizTimeClosed", nil)
 	player:SetAttribute("TempoConclusaoQuiz", nil)
 	player:SetAttribute("TempoRestanteCongeladoQuiz", nil)
 	updateLeaderstats(player, 0)
@@ -603,9 +653,10 @@ local function handleRewardAreaTimeExpired(player: Player, session: PlayerSessio
 end
 
 local function activateRewardAreaSession(player: Player, session: PlayerSession)
+	freezeQuizCountdownIfRunning(player, session)
 	setPlayerState(player, session, PLAYER_STATES.IN_REWARD_AREA)
 
-	-- Mantém a mesma janela estrita de 10 minutos caso o jogador saia e retorne ao portal
+	-- Mantém a mesma janela estrita de 10 minutos (600s) caso o jogador saia e retorne ao portal
 	if session.RewardAreaEndTimestamp ~= nil then
 		if Workspace:GetServerTimeNow() >= session.RewardAreaEndTimestamp then
 			handleRewardAreaTimeExpired(player, session)
@@ -626,7 +677,7 @@ local function activateRewardAreaSession(player: Player, session: PlayerSession)
 			if remaining <= 0 then
 				break
 			end
-			task.wait(math.clamp(remaining, 0.1, 1.0))
+			task.wait(math.clamp(remaining, 0.1, 0.5))
 		end
 
 		if player.Parent ~= Players or playerSessions[player] ~= session or session.RewardTimerToken ~= currentToken then
@@ -711,6 +762,21 @@ local function handleQuizPromptTriggered(
 		end
 		if session.State == PLAYER_STATES.IN_REWARD_AREA then
 			notifyPlayer(player, "Retorne ao saguão principal para responder questões.", COLOR_NOTICE_WARNING)
+			return
+		end
+		if session.QuizTimeClosed then
+			notifyPlayer(player, "O tempo de 10 minutos das questões já encerrou nesta tentativa.", COLOR_NOTICE_WARNING)
+			return
+		end
+		if session.AllQuestionsCompleted then
+			notifyPlayer(player, "Todas as questões desta tentativa já foram concluídas.", COLOR_NOTICE_INFO)
+			return
+		end
+		if isTimedModeEnabled(player)
+			and not isQuizCountdownFinalized(player, session)
+			and (session.AttemptEndTimestamp or 0) <= Workspace:GetServerTimeNow()
+		then
+			notifyPlayer(player, "O tempo da tentativa esgotou.", COLOR_NOTICE_WARNING)
 			return
 		end
 
@@ -833,13 +899,15 @@ local function handleAnswerSubmission(player: Player, selectedIndex: any)
 		end
 	else
 		local timerExpired = timedMode
-			and not isFrozenApprovedAttempt(player)
+			and not isQuizCountdownFinalized(player, session)
 			and (session.AttemptEndTimestamp or 0) <= Workspace:GetServerTimeNow()
 		local validQuizState = session.TutorialCompleted
+			and not session.QuizTimeClosed
+			and not session.AllQuestionsCompleted
 			and (session.State == PLAYER_STATES.ANSWERING_QUESTIONS or session.State == PLAYER_STATES.REWARD_UNLOCKED)
 		if not validQuizState or timerExpired then
 			session.ActiveQuestion = nil
-			return { Aceito = false, Mensagem = "Esta tentativa não está mais aceitando respostas." }
+			return { Aceito = false, Mensagem = "O tempo para responder questões nesta tentativa foi encerrado." }
 		end
 	end
 
@@ -874,15 +942,11 @@ local function handleAnswerSubmission(player: Player, selectedIndex: any)
 			player:SetAttribute("AcertosQuiz", score)
 			updateLeaderstats(player, score)
 
-			-- Atualiza tempo de conclusão ranqueado ao atingir ou superar 15 acertos
+			-- Atualiza tempo de conclusão ranqueado ao atingir ou superar 15 acertos (mantendo o cronômetro total de 10 min ativo até completar as 20 questões ou entrar na Área de Recompensas)
 			if timedMode and score >= QuizConfig.REWARD_MIN_SCORE and session.AttemptStartTimestamp then
 				local nowServer = Workspace:GetServerTimeNow()
 				local elapsed = math.max(0, nowServer - session.AttemptStartTimestamp)
 				player:SetAttribute("TempoConclusaoQuiz", elapsed)
-				if player:GetAttribute("TempoRestanteCongeladoQuiz") == nil then
-					local endTimestamp = session.AttemptEndTimestamp or nowServer
-					player:SetAttribute("TempoRestanteCongeladoQuiz", math.max(0, endTimestamp - nowServer))
-				end
 			end
 		end
 
@@ -970,7 +1034,9 @@ local function handleAnswerSubmission(player: Player, selectedIndex: any)
 						end
 					end)
 				else
+					session.AllQuestionsCompleted = true
 					session.Progress = nil
+					freezeQuizCountdownIfRunning(player, session)
 					if not justQualifiedForRewards then
 						notifyPlayer(
 							player,
@@ -1771,6 +1837,8 @@ local function initializePlayer(player: Player)
 		AttemptStartTimestamp = nil,
 		AttemptEndTimestamp = nil,
 		AttemptTimerToken = 0,
+		AllQuestionsCompleted = false,
+		QuizTimeClosed = false,
 		RewardQualifiedTeleportDone = false,
 		RewardAreaEndTimestamp = nil,
 		RewardTimerToken = 0,
@@ -1789,6 +1857,7 @@ local function initializePlayer(player: Player)
 	player:SetAttribute("ModoComCronometro", nil)
 	player:SetAttribute("AcertosQuiz", 0)
 	player:SetAttribute("NumeroTentativaQuiz", 0)
+	player:SetAttribute("QuizTimeClosed", nil)
 	player:SetAttribute("TempoConclusaoQuiz", nil)
 	player:SetAttribute("TempoRestanteCongeladoQuiz", nil)
 	player:SetAttribute("InicioTentativaQuiz", nil)
@@ -1864,3 +1933,39 @@ Players.PlayerRemoving:Connect(cleanupPlayer)
 for _, existingPlayer in ipairs(Players:GetPlayers()) do
 	initializePlayer(existingPlayer)
 end
+
+-- Monitor espacial autoritativo da Área de Recompensas (Y < 500):
+-- garante ativação imediata do cronômetro de 10 minutos e impede acesso não qualificado
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		for player, session in pairs(playerSessions) do
+			local character = player.Character
+			local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+			if rootPart and rootPart:IsA("BasePart") and humanoid and humanoid.Health > 0 then
+				if rootPart.Position.Y < 500 then
+					local qualified = session.TutorialCompleted and getPlayerScore(player) >= QuizConfig.REWARD_MIN_SCORE
+					if not qualified then
+						if session.TutorialCompleted then
+							teleportToMainLobby(player)
+							notifyPlayer(
+								player,
+								string.format(
+									"Alcance %d acertos para acessar a Área de Recompensas.",
+									QuizConfig.REWARD_MIN_SCORE
+								),
+								COLOR_NOTICE_WARNING
+							)
+						else
+							teleportToTutorialRoom(player)
+							notifyPlayer(player, "Complete o tutorial antes de prosseguir.", COLOR_NOTICE_WARNING)
+						end
+					elseif session.State ~= PLAYER_STATES.IN_REWARD_AREA or session.RewardAreaEndTimestamp == nil then
+						activateRewardAreaSession(player, session)
+					end
+				end
+			end
+		end
+	end
+end)

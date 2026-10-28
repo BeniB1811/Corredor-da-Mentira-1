@@ -1,5 +1,5 @@
 --!strict
--- Controlador de interface do cliente (HUD, seleção de modo, questões e indicadores visuais).
+-- Controlador de interface do cliente (HUD de cronômetros, seleção de modo, questões autoajustáveis e indicadores).
 -- Toda validação de estado, pontuação, tempo e acesso a áreas permanece estritamente no servidor.
 
 local Players = game:GetService("Players")
@@ -76,9 +76,8 @@ local COLOR_ARROW_MATTE_GOLD = Color3.fromRGB(202, 154, 58)
 local CORNER_RADIUS_SM = UDim.new(0, 8)
 local CORNER_RADIUS_MD = UDim.new(0, 12)
 
-local QUIZ_WARNING_THRESHOLD_SECONDS = 30
-local REWARD_WARNING_THRESHOLD_SECONDS = 60
-local REWARD_CRITICAL_THRESHOLD_SECONDS = 15
+local TIMER_WARNING_THRESHOLD_SECONDS = 60
+local TIMER_CRITICAL_THRESHOLD_SECONDS = 15
 local TOAST_DISPLAY_SECONDS = 3.2
 local DOOR_OPEN_TRANSPARENCY = 0.82
 local DOOR_BARRIERS_FOLDER_NAME = "QuizDoorBarriers"
@@ -115,12 +114,44 @@ if not questionFrame then
 	return
 end
 
-local questionTextLabel = questionFrame:WaitForChild("Pergunta") :: TextLabel
-local closeQuestionButton = questionFrame:WaitForChild("Fechar") :: TextButton
+local function waitForDescendantByName(root: Instance, targetName: string, timeoutSeconds: number): Instance?
+	local existing = root:FindFirstChild(targetName, true)
+	if existing then
+		return existing
+	end
+	local deadline = os.clock() + timeoutSeconds
+	while os.clock() < deadline do
+		local found = root:FindFirstChild(targetName, true)
+		if found then
+			return found
+		end
+		task.wait(0.05)
+	end
+	return nil
+end
+
+local rawQuestionLabel = waitForDescendantByName(questionFrame, "Pergunta", 15)
+local rawCloseButton = waitForDescendantByName(questionFrame, "Fechar", 15)
+local rawAnswer1 = waitForDescendantByName(questionFrame, "Resposta 1", 15)
+local rawAnswer2 = waitForDescendantByName(questionFrame, "Resposta 2", 15)
+local rawAnswer3 = waitForDescendantByName(questionFrame, "Resposta 3", 15)
+
+if not (rawQuestionLabel and rawQuestionLabel:IsA("TextLabel"))
+	or not (rawCloseButton and rawCloseButton:IsA("TextButton"))
+	or not (rawAnswer1 and rawAnswer1:IsA("TextButton"))
+	or not (rawAnswer2 and rawAnswer2:IsA("TextButton"))
+	or not (rawAnswer3 and rawAnswer3:IsA("TextButton"))
+then
+	warn("[QuizClient] Elementos internos de Frame das perguntas não encontrados.")
+	return
+end
+
+local questionTextLabel = rawQuestionLabel :: TextLabel
+local closeQuestionButton = rawCloseButton :: TextButton
 local answerButtons: { TextButton } = {
-	questionFrame:WaitForChild("Resposta 1") :: TextButton,
-	questionFrame:WaitForChild("Resposta 2") :: TextButton,
-	questionFrame:WaitForChild("Resposta 3") :: TextButton,
+	rawAnswer1 :: TextButton,
+	rawAnswer2 :: TextButton,
+	rawAnswer3 :: TextButton,
 }
 
 local remotesFolder = ReplicatedStorage:WaitForChild(QuizConfig.REMOTES_FOLDER_NAME, 30)
@@ -150,9 +181,11 @@ end
 -- UTILITÁRIOS DE CONSTRUÇÃO VISUAL LIMPA
 -- ============================================================================
 
-local function removeLegacyGradients(target: Instance)
+local function removeLegacyModifiers(target: Instance, clearConstraints: boolean)
 	for _, child in ipairs(target:GetChildren()) do
 		if child:IsA("UIGradient") then
+			child:Destroy()
+		elseif clearConstraints and (child:IsA("UITextSizeConstraint") or child:IsA("UISizeConstraint")) then
 			child:Destroy()
 		end
 	end
@@ -184,7 +217,13 @@ local function ensureStroke(parent: GuiObject, color: Color3, thickness: number)
 	return resolved
 end
 
-local function ensurePadding(parent: GuiObject, topPx: number, bottomPx: number, leftPx: number, rightPx: number): UIPadding
+local function ensurePadding(
+	parent: GuiObject,
+	topPx: number,
+	bottomPx: number,
+	leftPx: number,
+	rightPx: number
+): UIPadding
 	local padding = parent:FindFirstChildOfClass("UIPadding")
 	if not padding then
 		local created = Instance.new("UIPadding")
@@ -199,16 +238,25 @@ local function ensurePadding(parent: GuiObject, topPx: number, bottomPx: number,
 	return resolved
 end
 
-local function ensureTextSizeConstraint(parent: GuiObject, minSize: number, maxSize: number): UITextSizeConstraint
-	local constraint = parent:FindFirstChildOfClass("UITextSizeConstraint")
-	if not constraint then
-		local created = Instance.new("UITextSizeConstraint")
+local function ensureListLayout(
+	parent: GuiObject,
+	fillDirection: Enum.FillDirection,
+	paddingPx: number,
+	horizontalAlignment: Enum.HorizontalAlignment,
+	verticalAlignment: Enum.VerticalAlignment?
+): UIListLayout
+	local layout = parent:FindFirstChildOfClass("UIListLayout")
+	if not layout then
+		local created = Instance.new("UIListLayout")
 		created.Parent = parent
-		constraint = created
+		layout = created
 	end
-	local resolved = constraint :: UITextSizeConstraint
-	resolved.MinTextSize = minSize
-	resolved.MaxTextSize = maxSize
+	local resolved = layout :: UIListLayout
+	resolved.FillDirection = fillDirection
+	resolved.SortOrder = Enum.SortOrder.LayoutOrder
+	resolved.Padding = UDim.new(0, paddingPx)
+	resolved.HorizontalAlignment = horizontalAlignment
+	resolved.VerticalAlignment = verticalAlignment or Enum.VerticalAlignment.Top
 	return resolved
 end
 
@@ -279,15 +327,23 @@ local soundAnswerCorrect = ensureSound("SomAcertoQuiz", SOUND_ANSWER_CORRECT_ID,
 local soundAnswerWrong = ensureSound("SomErroQuiz", SOUND_ANSWER_WRONG_ID, 0.5)
 local soundUiClick = ensureSound("SomCliqueQuiz", SOUND_UI_CLICK_ID, 0.45)
 
+-- Remove instâncias antigas de HUD caso existam de sessões anteriores
+for _, legacyName in ipairs({ "ContadorGeralRodada", "PainelTempoRecompensas" }) do
+	local legacyObj = screenGui:FindFirstChild(legacyName)
+	if legacyObj then
+		legacyObj:Destroy()
+	end
+end
+
 -- ============================================================================
--- HUD SUPERIOR: AÇÕES (ESQUERDA), CRONÔMETRO QUIZ (CENTRO), RECOMPENSAS (DIREITA)
+-- HUD SUPERIOR: AÇÕES (ESQUERDA) E CRONÔMETROS AUTORITATIVOS (CENTRO, SEM OBSTRUÇÃO)
 -- ============================================================================
 
 local resetButton = getOrCreateGuiObject(screenGui, "BotaoResetTentativa", "TextButton") :: TextButton
-removeLegacyGradients(resetButton)
+removeLegacyModifiers(resetButton, true)
 resetButton.AnchorPoint = Vector2.new(0, 0)
 resetButton.Position = UDim2.fromOffset(16, 8)
-resetButton.Size = UDim2.fromOffset(112, 36)
+resetButton.Size = UDim2.fromOffset(108, 36)
 resetButton.BackgroundColor3 = COLOR_SURFACE_SECONDARY
 resetButton.BackgroundTransparency = 0.04
 resetButton.BorderSizePixel = 0
@@ -303,10 +359,10 @@ local resetButtonStroke = ensureStroke(resetButton, COLOR_BORDER_SUBTLE, 1)
 local resetButtonScale = ensureScale(resetButton, "ButtonScale")
 
 local switchModeButton = getOrCreateGuiObject(screenGui, "BotaoTrocarModo", "TextButton") :: TextButton
-removeLegacyGradients(switchModeButton)
+removeLegacyModifiers(switchModeButton, true)
 switchModeButton.AnchorPoint = Vector2.new(0, 0)
-switchModeButton.Position = UDim2.fromOffset(136, 8)
-switchModeButton.Size = UDim2.fromOffset(156, 36)
+switchModeButton.Position = UDim2.fromOffset(132, 8)
+switchModeButton.Size = UDim2.fromOffset(152, 36)
 switchModeButton.BackgroundColor3 = COLOR_SURFACE_SECONDARY
 switchModeButton.BackgroundTransparency = 0.04
 switchModeButton.BorderSizePixel = 0
@@ -321,72 +377,90 @@ ensureCorner(switchModeButton, CORNER_RADIUS_SM)
 local switchModeStroke = ensureStroke(switchModeButton, COLOR_BORDER_SUBTLE, 1)
 local switchModeScale = ensureScale(switchModeButton, "ButtonScale")
 
-local timerLabel = getOrCreateGuiObject(screenGui, "ContadorGeralRodada", "TextLabel") :: TextLabel
-removeLegacyGradients(timerLabel)
-timerLabel.AnchorPoint = Vector2.new(0.5, 0)
-timerLabel.Position = UDim2.new(0.5, 0, 0, 8)
-timerLabel.Size = UDim2.fromOffset(184, 36)
-timerLabel.BackgroundColor3 = COLOR_SURFACE_PRIMARY
-timerLabel.BackgroundTransparency = 0.06
-timerLabel.BorderSizePixel = 0
-timerLabel.Font = Enum.Font.GothamBold
-timerLabel.Text = "--:--.---"
-timerLabel.TextColor3 = COLOR_TEXT_PRIMARY
-timerLabel.TextScaled = false
-timerLabel.TextSize = 18
-timerLabel.ZIndex = 20
-ensureCorner(timerLabel, CORNER_RADIUS_SM)
-ensureStroke(timerLabel, COLOR_BORDER_SUBTLE, 1)
+-- Barra centralizada de cronômetros (livre da PlayerList do Roblox no canto direito)
+local timersTopBar = getOrCreateGuiObject(screenGui, "BarraCronometrosTopo", "Frame") :: Frame
+timersTopBar.AnchorPoint = Vector2.new(0.5, 0)
+timersTopBar.Position = UDim2.new(0.5, 0, 0, 8)
+timersTopBar.Size = UDim2.fromOffset(0, 48)
+timersTopBar.AutomaticSize = Enum.AutomaticSize.X
+timersTopBar.BackgroundTransparency = 1
+timersTopBar.BorderSizePixel = 0
+timersTopBar.ZIndex = 20
+ensureListLayout(
+	timersTopBar,
+	Enum.FillDirection.Horizontal,
+	8,
+	Enum.HorizontalAlignment.Center,
+	Enum.VerticalAlignment.Center
+)
+
+type TimerHudCard = {
+	Root: Frame,
+	CaptionLabel: TextLabel,
+	TimeLabel: TextLabel,
+	Stroke: UIStroke,
+}
+
+local function createTimerHudCard(cardName: string, layoutOrder: number, captionText: string): TimerHudCard
+	local card = getOrCreateGuiObject(timersTopBar, cardName, "Frame") :: Frame
+	card.LayoutOrder = layoutOrder
+	card.Size = UDim2.fromOffset(172, 48)
+	card.BackgroundColor3 = COLOR_SURFACE_PRIMARY
+	card.BackgroundTransparency = 0.05
+	card.BorderSizePixel = 0
+	card.Visible = false
+	card.ZIndex = 20
+	ensureCorner(card, CORNER_RADIUS_SM)
+	local stroke = ensureStroke(card, COLOR_BORDER_SUBTLE, 1)
+
+	local caption = getOrCreateGuiObject(card, "Caption", "TextLabel") :: TextLabel
+	caption.Position = UDim2.fromOffset(12, 6)
+	caption.Size = UDim2.new(1, -24, 0, 14)
+	caption.BackgroundTransparency = 1
+	caption.Font = Enum.Font.GothamBold
+	caption.Text = captionText
+	caption.TextColor3 = COLOR_TEXT_SECONDARY
+	caption.TextSize = 10
+	caption.TextWrapped = false
+	caption.TextXAlignment = Enum.TextXAlignment.Center
+	caption.ZIndex = 21
+
+	local valueLabel = getOrCreateGuiObject(card, "TimeValue", "TextLabel") :: TextLabel
+	valueLabel.Position = UDim2.fromOffset(12, 20)
+	valueLabel.Size = UDim2.new(1, -24, 0, 22)
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.Font = Enum.Font.GothamBold
+	valueLabel.Text = "10:00"
+	valueLabel.TextColor3 = COLOR_TEXT_PRIMARY
+	valueLabel.TextSize = 18
+	valueLabel.TextWrapped = false
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Center
+	valueLabel.ZIndex = 21
+
+	return {
+		Root = card,
+		CaptionLabel = caption,
+		TimeLabel = valueLabel,
+		Stroke = stroke,
+	}
+end
+
+local quizTimerCard = createTimerHudCard("CardCronometroQuestoes", 1, "TEMPO DAS QUESTÕES")
+local rewardTimerCard = createTimerHudCard("CardCronometroRecompensas", 2, "ÁREA DE RECOMPENSAS")
 
 local statusLabel = getOrCreateGuiObject(screenGui, "EstadoRodada", "TextLabel") :: TextLabel
-removeLegacyGradients(statusLabel)
+removeLegacyModifiers(statusLabel, true)
 statusLabel.AnchorPoint = Vector2.new(0.5, 0)
-statusLabel.Position = UDim2.new(0.5, 0, 0, 48)
-statusLabel.Size = UDim2.new(0.6, 0, 0, 20)
+statusLabel.Position = UDim2.new(0.5, 0, 0, 60)
+statusLabel.Size = UDim2.new(0.62, 0, 0, 18)
 statusLabel.BackgroundTransparency = 1
 statusLabel.Font = Enum.Font.GothamMedium
 statusLabel.Text = "Selecione um modo para iniciar"
 statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
 statusLabel.TextScaled = false
-statusLabel.TextSize = 13
+statusLabel.TextSize = 12
 statusLabel.TextWrapped = true
 statusLabel.ZIndex = 20
-
--- HUD discreto e funcional da Área de Recompensas (contagem regressiva MM:SS)
-local rewardHudPanel = getOrCreateGuiObject(screenGui, "PainelTempoRecompensas", "Frame") :: Frame
-removeLegacyGradients(rewardHudPanel)
-rewardHudPanel.AnchorPoint = Vector2.new(1, 0)
-rewardHudPanel.Position = UDim2.new(1, -16, 0, 8)
-rewardHudPanel.Size = UDim2.fromOffset(188, 52)
-rewardHudPanel.BackgroundColor3 = COLOR_SURFACE_PRIMARY
-rewardHudPanel.BackgroundTransparency = 0.06
-rewardHudPanel.BorderSizePixel = 0
-rewardHudPanel.Visible = false
-rewardHudPanel.ZIndex = 20
-ensureCorner(rewardHudPanel, CORNER_RADIUS_SM)
-local rewardHudStroke = ensureStroke(rewardHudPanel, COLOR_BORDER_SUBTLE, 1)
-
-local rewardHudCaption = getOrCreateGuiObject(rewardHudPanel, "TituloRecompensas", "TextLabel") :: TextLabel
-rewardHudCaption.Position = UDim2.fromOffset(12, 8)
-rewardHudCaption.Size = UDim2.new(1, -24, 0, 14)
-rewardHudCaption.BackgroundTransparency = 1
-rewardHudCaption.Font = Enum.Font.GothamBold
-rewardHudCaption.Text = "ÁREA DE RECOMPENSAS"
-rewardHudCaption.TextColor3 = COLOR_TEXT_SECONDARY
-rewardHudCaption.TextSize = 10
-rewardHudCaption.TextXAlignment = Enum.TextXAlignment.Right
-rewardHudCaption.ZIndex = 21
-
-local rewardHudTimerLabel = getOrCreateGuiObject(rewardHudPanel, "TempoRestanteMMSS", "TextLabel") :: TextLabel
-rewardHudTimerLabel.Position = UDim2.fromOffset(12, 22)
-rewardHudTimerLabel.Size = UDim2.new(1, -24, 0, 22)
-rewardHudTimerLabel.BackgroundTransparency = 1
-rewardHudTimerLabel.Font = Enum.Font.GothamBold
-rewardHudTimerLabel.Text = "10:00"
-rewardHudTimerLabel.TextColor3 = COLOR_TEXT_PRIMARY
-rewardHudTimerLabel.TextSize = 18
-rewardHudTimerLabel.TextXAlignment = Enum.TextXAlignment.Right
-rewardHudTimerLabel.ZIndex = 21
 
 -- Notificação Toast limpa com barra lateral semântica de 3px
 local existingLegacyToast = screenGui:FindFirstChild("QuizToastNotification")
@@ -396,15 +470,16 @@ end
 
 local toastFrame = getOrCreateGuiObject(screenGui, "QuizToastNotification", "Frame") :: Frame
 toastFrame.AnchorPoint = Vector2.new(0.5, 0)
-toastFrame.Position = UDim2.new(0.5, 0, 0, 76)
-toastFrame.Size = UDim2.new(0.76, 0, 0, 44)
+toastFrame.Position = UDim2.new(0.5, 0, 0, 82)
+toastFrame.Size = UDim2.new(0.76, 0, 0, 0)
+toastFrame.AutomaticSize = Enum.AutomaticSize.Y
 toastFrame.BackgroundColor3 = COLOR_SURFACE_PRIMARY
 toastFrame.BackgroundTransparency = 0.05
 toastFrame.BorderSizePixel = 0
 toastFrame.Visible = false
 toastFrame.ClipsDescendants = true
 toastFrame.ZIndex = 28
-ensureSizeConstraint(toastFrame, Vector2.new(280, 40), Vector2.new(480, 56))
+ensureSizeConstraint(toastFrame, Vector2.new(280, 38), Vector2.new(480, 120))
 ensureCorner(toastFrame, CORNER_RADIUS_SM)
 ensureStroke(toastFrame, COLOR_BORDER_SUBTLE, 1)
 
@@ -417,16 +492,19 @@ toastAccentBar.ZIndex = 29
 
 local toastTextLabel = getOrCreateGuiObject(toastFrame, "Message", "TextLabel") :: TextLabel
 toastTextLabel.Position = UDim2.fromOffset(16, 0)
-toastTextLabel.Size = UDim2.new(1, -28, 1, 0)
+toastTextLabel.Size = UDim2.new(1, -28, 0, 0)
+toastTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 toastTextLabel.BackgroundTransparency = 1
 toastTextLabel.Font = Enum.Font.GothamMedium
 toastTextLabel.Text = ""
 toastTextLabel.TextColor3 = COLOR_TEXT_PRIMARY
-toastTextLabel.TextSize = 14
+toastTextLabel.TextSize = 13
+toastTextLabel.TextScaled = false
 toastTextLabel.TextWrapped = true
 toastTextLabel.TextXAlignment = Enum.TextXAlignment.Left
 toastTextLabel.TextYAlignment = Enum.TextYAlignment.Center
 toastTextLabel.ZIndex = 29
+ensurePadding(toastTextLabel, 10, 10, 0, 0)
 
 local function bindSubtleButtonFeedback(
 	button: TextButton,
@@ -511,7 +589,7 @@ modeModalCard.BackgroundTransparency = 0
 modeModalCard.BorderSizePixel = 0
 modeModalCard.ZIndex = 46
 modeModalCard.Parent = modeModalBackdrop
-ensureSizeConstraint(modeModalCard, Vector2.new(320, 340), Vector2.new(608, 392))
+ensureSizeConstraint(modeModalCard, Vector2.new(320, 320), Vector2.new(608, 384))
 ensureCorner(modeModalCard, CORNER_RADIUS_MD)
 ensureStroke(modeModalCard, COLOR_BORDER_SUBTLE, 1)
 local modeModalScale = ensureScale(modeModalCard, "CardScale")
@@ -553,6 +631,7 @@ modeModalTitle.Font = Enum.Font.GothamBold
 modeModalTitle.Text = "Selecionar Modo de Jogo"
 modeModalTitle.TextColor3 = COLOR_TEXT_PRIMARY
 modeModalTitle.TextSize = 20
+modeModalTitle.TextWrapped = true
 modeModalTitle.TextXAlignment = Enum.TextXAlignment.Left
 modeModalTitle.ZIndex = 47
 modeModalTitle.Parent = modeModalCard
@@ -573,8 +652,8 @@ modeModalSubtitle.Parent = modeModalCard
 
 local modeCardsContainer = Instance.new("Frame")
 modeCardsContainer.Name = "CardsContainer"
-modeCardsContainer.Position = UDim2.fromOffset(24, 80)
-modeCardsContainer.Size = UDim2.new(1, -48, 1, -104)
+modeCardsContainer.Position = UDim2.fromOffset(24, 78)
+modeCardsContainer.Size = UDim2.new(1, -48, 1, -100)
 modeCardsContainer.BackgroundTransparency = 1
 modeCardsContainer.ZIndex = 47
 modeCardsContainer.Parent = modeModalCard
@@ -603,39 +682,41 @@ local function createModeOptionCard(
 
 	local tagLabel = Instance.new("TextLabel")
 	tagLabel.Name = "Tag"
-	tagLabel.Position = UDim2.fromOffset(16, 16)
+	tagLabel.Position = UDim2.fromOffset(16, 14)
 	tagLabel.Size = UDim2.new(1, -32, 0, 14)
 	tagLabel.BackgroundTransparency = 1
 	tagLabel.Font = Enum.Font.GothamBold
 	tagLabel.Text = tagText
 	tagLabel.TextColor3 = if isPrimaryCta then COLOR_CTA_PRIMARY_HOVER else COLOR_TEXT_MUTED
 	tagLabel.TextSize = 11
+	tagLabel.TextWrapped = true
 	tagLabel.TextXAlignment = Enum.TextXAlignment.Left
 	tagLabel.ZIndex = 49
 	tagLabel.Parent = optionCard
 
 	local titleLabel = Instance.new("TextLabel")
 	titleLabel.Name = "OptionTitle"
-	titleLabel.Position = UDim2.fromOffset(16, 34)
-	titleLabel.Size = UDim2.new(1, -32, 0, 24)
+	titleLabel.Position = UDim2.fromOffset(16, 32)
+	titleLabel.Size = UDim2.new(1, -32, 0, 22)
 	titleLabel.BackgroundTransparency = 1
 	titleLabel.Font = Enum.Font.GothamBold
 	titleLabel.Text = titleText
 	titleLabel.TextColor3 = COLOR_TEXT_PRIMARY
-	titleLabel.TextSize = 17
+	titleLabel.TextSize = 16
+	titleLabel.TextWrapped = true
 	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
 	titleLabel.ZIndex = 49
 	titleLabel.Parent = optionCard
 
 	local descriptionLabel = Instance.new("TextLabel")
 	descriptionLabel.Name = "OptionDescription"
-	descriptionLabel.Position = UDim2.fromOffset(16, 66)
-	descriptionLabel.Size = UDim2.new(1, -32, 1, -130)
+	descriptionLabel.Position = UDim2.fromOffset(16, 60)
+	descriptionLabel.Size = UDim2.new(1, -32, 1, -120)
 	descriptionLabel.BackgroundTransparency = 1
 	descriptionLabel.Font = Enum.Font.Gotham
 	descriptionLabel.Text = descriptionText
 	descriptionLabel.TextColor3 = COLOR_TEXT_SECONDARY
-	descriptionLabel.TextSize = 13
+	descriptionLabel.TextSize = 12
 	descriptionLabel.TextWrapped = true
 	descriptionLabel.TextXAlignment = Enum.TextXAlignment.Left
 	descriptionLabel.TextYAlignment = Enum.TextYAlignment.Top
@@ -647,7 +728,7 @@ local function createModeOptionCard(
 	ctaButton.Name = "ActionButton"
 	ctaButton.AnchorPoint = Vector2.new(0.5, 1)
 	ctaButton.Position = UDim2.new(0.5, 0, 1, -16)
-	ctaButton.Size = UDim2.new(1, -32, 0, 40)
+	ctaButton.Size = UDim2.new(1, -32, 0, 38)
 	ctaButton.BackgroundColor3 = if isPrimaryCta then COLOR_CTA_PRIMARY else COLOR_SURFACE_ELEVATED
 	ctaButton.BorderSizePixel = 0
 	ctaButton.AutoButtonColor = false
@@ -655,6 +736,7 @@ local function createModeOptionCard(
 	ctaButton.Text = ctaText
 	ctaButton.TextColor3 = COLOR_TEXT_PRIMARY
 	ctaButton.TextSize = 13
+	ctaButton.TextWrapped = true
 	ctaButton.ZIndex = 50
 	ctaButton.Parent = optionCard
 	ensureCorner(ctaButton, CORNER_RADIUS_SM)
@@ -683,8 +765,8 @@ local selectTimedButton = createModeOptionCard(
 	0,
 	0,
 	"RANKING GLOBAL",
-	"Com Cronômetro",
-	"• Limite de 10 minutos por tentativa\n• Cronômetro visível no topo da tela\n• Pontuação e tempo elegíveis ao Top 10 Global",
+	"Com Cronômetro (10 min)",
+	"• 10 minutos totais para responder as questões\n• Cronômetro regressivo visível no topo\n• Tentativa invalidada se zerar sem 15 acertos\n• Elegível ao Top 10 Global",
 	"Jogar com Cronômetro",
 	true
 )
@@ -695,12 +777,22 @@ local selectFreeButton = createModeOptionCard(
 	1,
 	"PRÁTICA LIVRE",
 	"Sem Cronômetro",
-	"• Sem limite de tempo para responder\n• Cronômetro oculto durante o percurso\n• Progresso não contabilizado no Ranking Global",
+	"• Sem limite de tempo durante as questões\n• Cronômetro de questões oculto no percurso\n• Limite padrão de 10 min na Área de Recompensas",
 	"Jogar no Modo Livre",
 	false
 )
 
 local isModeModalOpen = false
+
+local function computeFittedScaleForModal(modalFrame: GuiObject, modalScale: UIScale, topReservedPx: number): number
+	local currentScale = math.max(0.1, modalScale.Scale)
+	local unscaledHeight = modalFrame.AbsoluteSize.Y / currentScale
+	local availableHeight = math.max(180, screenGui.AbsoluteSize.Y - topReservedPx)
+	if unscaledHeight <= 0 then
+		return 1
+	end
+	return math.clamp(availableHeight / unscaledHeight, 0.58, 1)
+end
 
 local function canDismissModeModal(): boolean
 	local hasMode = localPlayer:GetAttribute("ModoComCronometro") ~= nil
@@ -719,11 +811,13 @@ local function openModeModal()
 	end
 	isModeModalOpen = true
 	modeModalBackdrop.Visible = true
-	modeModalScale.Scale = 0.96
+	modeModalScale.Scale = 1
+	local targetScale = computeFittedScaleForModal(modeModalCard, modeModalScale, 32)
+	modeModalScale.Scale = targetScale * 0.96
 	modeModalBackdrop.BackgroundTransparency = 1
 	local openInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 	TweenService:Create(modeModalBackdrop, openInfo, { BackgroundTransparency = 0.42 }):Play()
-	TweenService:Create(modeModalScale, openInfo, { Scale = 1 }):Play()
+	TweenService:Create(modeModalScale, openInfo, { Scale = targetScale }):Play()
 end
 
 local function closeModeModal(forceClose: boolean?)
@@ -735,7 +829,7 @@ local function closeModeModal(forceClose: boolean?)
 	end
 	isModeModalOpen = false
 	local closeInfo = TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-	local scaleTween = TweenService:Create(modeModalScale, closeInfo, { Scale = 0.96 })
+	local scaleTween = TweenService:Create(modeModalScale, closeInfo, { Scale = modeModalScale.Scale * 0.96 })
 	TweenService:Create(modeModalBackdrop, closeInfo, { BackgroundTransparency = 1 }):Play()
 	scaleTween:Play()
 	scaleTween.Completed:Wait()
@@ -767,72 +861,78 @@ trackConnection(selectFreeButton.Activated:Connect(function()
 end))
 
 -- ============================================================================
--- ESTILIZAÇÃO LIMPA DO PAINEL DE QUESTÕES (FRAME DAS PERGUNTAS)
+-- CONTAINER DINÂMICO DE QUESTÕES (AUTOMATICSIZE.Y + UILISTLAYOUT + UIPADDING)
 -- ============================================================================
 
-local preservedQuestionChildren: { [Instance]: boolean } = {
+removeLegacyModifiers(questionFrame, true)
+removeLegacyModifiers(questionTextLabel, true)
+removeLegacyModifiers(closeQuestionButton, true)
+
+local managedQuestionObjects: { [Instance]: boolean } = {
 	[questionTextLabel] = true,
 	[closeQuestionButton] = true,
 }
 for _, button in ipairs(answerButtons) do
-	preservedQuestionChildren[button] = true
+	managedQuestionObjects[button] = true
 end
 
-removeLegacyGradients(questionFrame)
-removeLegacyGradients(questionTextLabel)
-removeLegacyGradients(closeQuestionButton)
+local managedContainerNames: { [string]: boolean } = {
+	CabecalhoQuestao = true,
+	InstrucaoQuestaoLabel = true,
+	SeparadorCabecalho = true,
+	ContainerAlternativas = true,
+}
 
 for _, child in ipairs(questionFrame:GetChildren()) do
-	if child:IsA("GuiObject") and not preservedQuestionChildren[child] then
-		if child.Name ~= "CategoriaNivelLabel" and child.Name ~= "InstrucaoQuestaoLabel" and child.Name ~= "SeparadorCabecalho" then
-			child.Visible = false
-		end
+	if child:IsA("GuiObject") and not managedQuestionObjects[child] and not managedContainerNames[child.Name] then
+		child.Visible = false
 	end
 end
 
+-- Container externo da pergunta com ajuste dinâmico vertical (AutomaticSize.Y)
 questionFrame.AnchorPoint = Vector2.new(0.5, 0.5)
-questionFrame.Position = UDim2.fromScale(0.5, 0.52)
-questionFrame.Size = UDim2.new(0.9, 0, 0.74, 0)
+questionFrame.Position = UDim2.new(0.5, 0, 0.5, 22)
+questionFrame.Size = UDim2.new(0.88, 0, 0, 0)
+questionFrame.AutomaticSize = Enum.AutomaticSize.Y
 questionFrame.BackgroundColor3 = COLOR_SURFACE_PRIMARY
 questionFrame.BackgroundTransparency = 0.02
 questionFrame.BorderSizePixel = 0
+questionFrame.ClipsDescendants = false
 questionFrame.Visible = false
-ensureSizeConstraint(questionFrame, Vector2.new(312, 312), Vector2.new(544, 416))
+ensureSizeConstraint(questionFrame, Vector2.new(300, 0), Vector2.new(528, 4096))
 ensureCorner(questionFrame, CORNER_RADIUS_MD)
 ensureStroke(questionFrame, COLOR_BORDER_SUBTLE, 1)
+ensurePadding(questionFrame, 16, 18, 20, 20)
+ensureListLayout(questionFrame, Enum.FillDirection.Vertical, 10, Enum.HorizontalAlignment.Center)
 local questionFrameScale = ensureScale(questionFrame, "FrameQuizScale")
 
-local questionCategoryLabel = getOrCreateGuiObject(questionFrame, "CategoriaNivelLabel", "TextLabel") :: TextLabel
-questionCategoryLabel.AnchorPoint = Vector2.new(0, 0)
-questionCategoryLabel.Position = UDim2.fromOffset(24, 18)
-questionCategoryLabel.Size = UDim2.new(1, -80, 0, 16)
+-- 1. Cabeçalho superior (Categoria à esquerda + botão Fechar à direita)
+local questionHeaderRow = getOrCreateGuiObject(questionFrame, "CabecalhoQuestao", "Frame") :: Frame
+questionHeaderRow.LayoutOrder = 1
+questionHeaderRow.Size = UDim2.new(1, 0, 0, 28)
+questionHeaderRow.AutomaticSize = Enum.AutomaticSize.None
+questionHeaderRow.BackgroundTransparency = 1
+questionHeaderRow.BorderSizePixel = 0
+
+local questionCategoryLabel = getOrCreateGuiObject(questionHeaderRow, "CategoriaNivelLabel", "TextLabel") :: TextLabel
+questionCategoryLabel.AnchorPoint = Vector2.new(0, 0.5)
+questionCategoryLabel.Position = UDim2.fromScale(0, 0.5)
+questionCategoryLabel.Size = UDim2.new(1, -38, 1, 0)
 questionCategoryLabel.BackgroundTransparency = 1
 questionCategoryLabel.Font = Enum.Font.GothamBold
 questionCategoryLabel.Text = "QUESTÃO"
 questionCategoryLabel.TextColor3 = COLOR_CTA_PRIMARY_HOVER
 questionCategoryLabel.TextSize = 11
+questionCategoryLabel.TextScaled = false
+questionCategoryLabel.TextWrapped = true
 questionCategoryLabel.TextXAlignment = Enum.TextXAlignment.Left
+questionCategoryLabel.TextYAlignment = Enum.TextYAlignment.Center
 
-local questionInstructionLabel = getOrCreateGuiObject(questionFrame, "InstrucaoQuestaoLabel", "TextLabel") :: TextLabel
-questionInstructionLabel.AnchorPoint = Vector2.new(0, 0)
-questionInstructionLabel.Position = UDim2.fromOffset(24, 124)
-questionInstructionLabel.Size = UDim2.new(1, -48, 0, 16)
-questionInstructionLabel.BackgroundTransparency = 1
-questionInstructionLabel.Font = Enum.Font.GothamMedium
-questionInstructionLabel.Text = "Selecione a única afirmação FALSA abaixo:"
-questionInstructionLabel.TextColor3 = COLOR_TEXT_MUTED
-questionInstructionLabel.TextSize = 12
-questionInstructionLabel.TextXAlignment = Enum.TextXAlignment.Left
-
-local headerDivider = getOrCreateGuiObject(questionFrame, "SeparadorCabecalho", "Frame") :: Frame
-headerDivider.Position = UDim2.fromOffset(24, 148)
-headerDivider.Size = UDim2.new(1, -48, 0, 1)
-headerDivider.BackgroundColor3 = COLOR_BORDER_SUBTLE
-headerDivider.BorderSizePixel = 0
-
-closeQuestionButton.AnchorPoint = Vector2.new(1, 0)
-closeQuestionButton.Position = UDim2.new(1, -16, 0, 16)
-closeQuestionButton.Size = UDim2.fromOffset(32, 32)
+closeQuestionButton.Parent = questionHeaderRow
+closeQuestionButton.AnchorPoint = Vector2.new(1, 0.5)
+closeQuestionButton.Position = UDim2.fromScale(1, 0.5)
+closeQuestionButton.Size = UDim2.fromOffset(28, 28)
+closeQuestionButton.AutomaticSize = Enum.AutomaticSize.None
 closeQuestionButton.BackgroundColor3 = COLOR_SURFACE_SECONDARY
 closeQuestionButton.BackgroundTransparency = 0
 closeQuestionButton.BorderSizePixel = 0
@@ -841,7 +941,8 @@ closeQuestionButton.Font = Enum.Font.GothamBold
 closeQuestionButton.Text = "×"
 closeQuestionButton.TextColor3 = COLOR_TEXT_SECONDARY
 closeQuestionButton.TextScaled = false
-closeQuestionButton.TextSize = 20
+closeQuestionButton.TextSize = 18
+closeQuestionButton.TextWrapped = false
 ensureCorner(closeQuestionButton, CORNER_RADIUS_SM)
 local closeQuestionStroke = ensureStroke(closeQuestionButton, COLOR_BORDER_SUBTLE, 1)
 local closeQuestionScale = ensureScale(closeQuestionButton, "ButtonScale")
@@ -855,40 +956,94 @@ bindSubtleButtonFeedback(
 	COLOR_BORDER_STRONG
 )
 
+-- 2. Enunciado da questão com quebra automática de linha e altura dinâmica
+questionTextLabel.Parent = questionFrame
+questionTextLabel.LayoutOrder = 2
 questionTextLabel.AnchorPoint = Vector2.new(0, 0)
-questionTextLabel.Position = UDim2.fromOffset(24, 40)
-questionTextLabel.Size = UDim2.new(1, -48, 0, 78)
+questionTextLabel.Position = UDim2.fromOffset(0, 0)
+questionTextLabel.Size = UDim2.new(1, 0, 0, 0)
+questionTextLabel.AutomaticSize = Enum.AutomaticSize.Y
 questionTextLabel.BackgroundTransparency = 1
 questionTextLabel.BorderSizePixel = 0
 questionTextLabel.Font = Enum.Font.GothamBold
 questionTextLabel.TextColor3 = COLOR_TEXT_PRIMARY
+questionTextLabel.TextScaled = false
+questionTextLabel.TextSize = 17
+questionTextLabel.LineHeight = 1.2
 questionTextLabel.TextWrapped = true
-questionTextLabel.TextScaled = true
 questionTextLabel.TextXAlignment = Enum.TextXAlignment.Left
-questionTextLabel.TextYAlignment = Enum.TextYAlignment.Center
-ensureTextSizeConstraint(questionTextLabel, 15, 21)
+questionTextLabel.TextYAlignment = Enum.TextYAlignment.Top
+
+-- 3. Instrução contextual
+local questionInstructionLabel = getOrCreateGuiObject(questionFrame, "InstrucaoQuestaoLabel", "TextLabel") :: TextLabel
+questionInstructionLabel.LayoutOrder = 3
+questionInstructionLabel.Size = UDim2.new(1, 0, 0, 0)
+questionInstructionLabel.AutomaticSize = Enum.AutomaticSize.Y
+questionInstructionLabel.BackgroundTransparency = 1
+questionInstructionLabel.Font = Enum.Font.GothamMedium
+questionInstructionLabel.Text = "Selecione a única afirmação FALSA abaixo:"
+questionInstructionLabel.TextColor3 = COLOR_TEXT_MUTED
+questionInstructionLabel.TextScaled = false
+questionInstructionLabel.TextSize = 12
+questionInstructionLabel.TextWrapped = true
+questionInstructionLabel.TextXAlignment = Enum.TextXAlignment.Left
+questionInstructionLabel.TextYAlignment = Enum.TextYAlignment.Top
+
+-- 4. Divisor estrutural
+local headerDivider = getOrCreateGuiObject(questionFrame, "SeparadorCabecalho", "Frame") :: Frame
+headerDivider.LayoutOrder = 4
+headerDivider.Size = UDim2.new(1, 0, 0, 1)
+headerDivider.AutomaticSize = Enum.AutomaticSize.None
+headerDivider.BackgroundColor3 = COLOR_BORDER_SUBTLE
+headerDivider.BorderSizePixel = 0
+
+-- 5. Container vertical dinâmico das alternativas
+local answersListContainer = getOrCreateGuiObject(questionFrame, "ContainerAlternativas", "Frame") :: Frame
+answersListContainer.LayoutOrder = 5
+answersListContainer.Size = UDim2.new(1, 0, 0, 0)
+answersListContainer.AutomaticSize = Enum.AutomaticSize.Y
+answersListContainer.BackgroundTransparency = 1
+answersListContainer.BorderSizePixel = 0
+ensureListLayout(answersListContainer, Enum.FillDirection.Vertical, 8, Enum.HorizontalAlignment.Center)
 
 local answerButtonStrokes: { UIStroke } = {}
+local answerTextLabels: { TextLabel } = {}
 local hasSubmittedCurrentAnswer = false
 
 for index, button in ipairs(answerButtons) do
-	removeLegacyGradients(button)
-	button.AnchorPoint = Vector2.new(0.5, 0)
-	button.Position = UDim2.new(0.5, 0, 0, 164 + (index - 1) * 76)
-	button.Size = UDim2.new(1, -48, 0, 64)
+	removeLegacyModifiers(button, true)
+	button.Parent = answersListContainer
+	button.LayoutOrder = index
+	button.AnchorPoint = Vector2.new(0, 0)
+	button.Position = UDim2.fromOffset(0, 0)
+	button.Size = UDim2.new(1, 0, 0, 0)
+	button.AutomaticSize = Enum.AutomaticSize.Y
 	button.BackgroundColor3 = COLOR_SURFACE_SECONDARY
 	button.BackgroundTransparency = 0
 	button.BorderSizePixel = 0
 	button.AutoButtonColor = false
-	button.Font = Enum.Font.GothamMedium
-	button.TextColor3 = COLOR_TEXT_PRIMARY
+	button.Text = ""
 	button.TextWrapped = true
-	button.TextScaled = true
-	button.TextXAlignment = Enum.TextXAlignment.Left
-	button.TextYAlignment = Enum.TextYAlignment.Center
+	button.TextScaled = false
 	ensureCorner(button, CORNER_RADIUS_SM)
-	ensurePadding(button, 8, 8, 16, 16)
-	ensureTextSizeConstraint(button, 13, 17)
+	ensurePadding(button, 12, 12, 16, 16)
+
+	-- Label interno dedicado garante medição exata de quebra de linha considerando o UIPadding
+	local innerLabel = getOrCreateGuiObject(button, "TextoAlternativa", "TextLabel") :: TextLabel
+	innerLabel.Size = UDim2.new(1, 0, 0, 0)
+	innerLabel.AutomaticSize = Enum.AutomaticSize.Y
+	innerLabel.BackgroundTransparency = 1
+	innerLabel.Active = false
+	innerLabel.Interactable = false
+	innerLabel.Font = Enum.Font.GothamMedium
+	innerLabel.TextColor3 = COLOR_TEXT_PRIMARY
+	innerLabel.TextScaled = false
+	innerLabel.TextSize = 14
+	innerLabel.LineHeight = 1.22
+	innerLabel.TextWrapped = true
+	innerLabel.TextXAlignment = Enum.TextXAlignment.Left
+	innerLabel.TextYAlignment = Enum.TextYAlignment.Center
+	answerTextLabels[index] = innerLabel
 
 	local stroke = ensureStroke(button, COLOR_BORDER_SUBTLE, 1)
 	answerButtonStrokes[index] = stroke
@@ -911,11 +1066,15 @@ end
 local function resetAnswerButtonsVisualState()
 	for index, button in ipairs(answerButtons) do
 		button.BackgroundColor3 = COLOR_SURFACE_SECONDARY
-		button.TextColor3 = COLOR_TEXT_PRIMARY
 		button.BackgroundTransparency = 0
-		button.TextTransparency = 0
+		button.Text = ""
 		button.Active = true
 		button.AutoButtonColor = false
+		local innerLabel = answerTextLabels[index]
+		if innerLabel then
+			innerLabel.TextColor3 = COLOR_TEXT_PRIMARY
+			innerLabel.TextTransparency = 0
+		end
 		local stroke = answerButtonStrokes[index]
 		if stroke then
 			stroke.Color = COLOR_BORDER_SUBTLE
@@ -923,6 +1082,22 @@ local function resetAnswerButtonsVisualState()
 		end
 	end
 end
+
+local function refreshQuestionModalViewportFit()
+	if not questionFrame.Visible then
+		return
+	end
+	questionFrameScale.Scale = computeFittedScaleForModal(questionFrame, questionFrameScale, 88)
+end
+
+trackConnection(screenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+	if questionFrame.Visible then
+		refreshQuestionModalViewportFit()
+	end
+	if isModeModalOpen then
+		modeModalScale.Scale = computeFittedScaleForModal(modeModalCard, modeModalScale, 32)
+	end
+end))
 
 local isClosingQuestion = false
 local function closeQuestionModal()
@@ -936,7 +1111,7 @@ local function closeQuestionModal()
 	local closeTween = TweenService:Create(
 		questionFrameScale,
 		TweenInfo.new(0.14, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-		{ Scale = 0.96 }
+		{ Scale = questionFrameScale.Scale * 0.96 }
 	)
 	closeTween:Play()
 	closeTween.Completed:Wait()
@@ -992,67 +1167,158 @@ end
 trackConnection(NotificarMensagem.OnClientEvent:Connect(showToastNotification))
 
 -- ============================================================================
--- FORMATAÇÃO DE TEMPO E SINCRONIZAÇÃO DE ESTADO DO HUD
+-- SISTEMA DE CRONÔMETROS (QUESTÕES 10 MIN + ÁREA DE RECOMPENSAS 10 MIN, SEM LAG)
 -- ============================================================================
 
-local function formatTimeMillis(seconds: number): string
-	local totalMilliseconds = math.floor(math.max(0, seconds) * 1000 + 0.5)
-	local minutes = math.floor(totalMilliseconds / 60000)
-	local remainingSeconds = math.floor(totalMilliseconds / 1000) % 60
-	local milliseconds = totalMilliseconds % 1000
-	return string.format("%02d:%02d.%03d", minutes, remainingSeconds, milliseconds)
-end
-
-local function formatTimeMinutesSeconds(seconds: number): string
-	local totalSeconds = math.max(0, math.ceil(seconds))
-	local minutes = math.floor(totalSeconds / 60)
-	local remainingSeconds = totalSeconds % 60
-	return string.format("%02d:%02d", minutes, remainingSeconds)
+local function formatRemainingClock(seconds: number): string
+	local clampedSeconds = math.max(0, math.ceil(seconds))
+	local minutesPart = math.floor(clampedSeconds / 60)
+	local secondsPart = clampedSeconds % 60
+	return string.format("%02d:%02d", minutesPart, secondsPart)
 end
 
 local currentPhase = "Tutorial"
-local lastStatusCountdownText = ""
-local lastAttemptStopwatchText = ""
-local lastRewardTimerText = ""
+local lastDisplayedQuizTime = ""
+local lastDisplayedRewardTime = ""
+local lastDisplayedStatusText = ""
 
-local function renderApprovedFrozenTimer(): boolean
-	local completionTime = localPlayer:GetAttribute("TempoConclusaoQuiz")
-	local frozenRemaining = localPlayer:GetAttribute("TempoRestanteCongeladoQuiz")
-	if typeof(completionTime) ~= "number" or typeof(frozenRemaining) ~= "number" then
-		return false
+local function applyTimerSemanticColors(card: TimerHudCard, remainingSeconds: number, isCompleted: boolean)
+	if isCompleted then
+		card.TimeLabel.TextColor3 = COLOR_ACCENT_SUCCESS_BORDER
+		card.Stroke.Color = COLOR_ACCENT_SUCCESS_BORDER
+	elseif remainingSeconds <= TIMER_CRITICAL_THRESHOLD_SECONDS then
+		card.TimeLabel.TextColor3 = COLOR_ACCENT_DANGER_BORDER
+		card.Stroke.Color = COLOR_ACCENT_DANGER_BORDER
+	elseif remainingSeconds <= TIMER_WARNING_THRESHOLD_SECONDS then
+		card.TimeLabel.TextColor3 = COLOR_ACCENT_WARNING
+		card.Stroke.Color = COLOR_ACCENT_WARNING
+	else
+		card.TimeLabel.TextColor3 = COLOR_TEXT_PRIMARY
+		card.Stroke.Color = COLOR_BORDER_SUBTLE
 	end
-	timerLabel.Text = formatTimeMillis(completionTime)
-	timerLabel.TextColor3 = COLOR_ACCENT_SUCCESS_BORDER
-	local currentScore = tonumber(localPlayer:GetAttribute("AcertosQuiz")) or 0
-	statusLabel.Text = string.format("%d/%d acertos · Recompensas liberadas", currentScore, QuizConfig.MAX_SCORE)
-	statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
-	return true
 end
 
-local function updateModeHudControls()
+local function setStatusLine(nextText: string, nextColor: Color3)
+	if nextText ~= lastDisplayedStatusText then
+		lastDisplayedStatusText = nextText
+		statusLabel.Text = nextText
+	end
+	if statusLabel.TextColor3 ~= nextColor then
+		statusLabel.TextColor3 = nextColor
+	end
+end
+
+local function updateModeButtonText()
 	updateModeModalDismissVisibility()
 	local timedMode = localPlayer:GetAttribute("ModoComCronometro")
-	if timedMode == false then
-		timerLabel.Visible = false
+	if timedMode == true then
+		switchModeButton.Text = "Modo: Cronômetro"
+	elseif timedMode == false then
 		switchModeButton.Text = "Modo: Livre"
-		local attempt = math.max(1, tonumber(localPlayer:GetAttribute("NumeroTentativaQuiz")) or 1)
-		local currentScore = tonumber(localPlayer:GetAttribute("AcertosQuiz")) or 0
-		if currentScore >= QuizConfig.REWARD_MIN_SCORE then
-			statusLabel.Text = string.format("Modo Livre · %d/%d acertos · Recompensas liberadas", currentScore, QuizConfig.MAX_SCORE)
-		elseif currentPhase == "Ativa" then
-			statusLabel.Text = string.format("Modo Livre · Tentativa %d", attempt)
-		else
-			statusLabel.Text = "Modo Livre · Conclua o tutorial para iniciar"
-		end
-		statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
-	elseif timedMode == true then
-		timerLabel.Visible = true
-		switchModeButton.Text = "Modo: Ranqueado"
 	else
-		timerLabel.Visible = false
 		switchModeButton.Text = "Modo: Selecionar"
-		statusLabel.Text = "Selecione um modo para iniciar"
-		statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
+	end
+end
+
+local function updateAllTimersAndStatusHud()
+	local nowServer = Workspace:GetServerTimeNow()
+	local playerState = localPlayer:GetAttribute("PlayerState")
+	local timedMode = localPlayer:GetAttribute("ModoComCronometro")
+	local currentScore = math.clamp(math.floor(tonumber(localPlayer:GetAttribute("AcertosQuiz")) or 0), 0, QuizConfig.MAX_SCORE)
+	local attemptNumber = math.max(1, math.floor(tonumber(localPlayer:GetAttribute("NumeroTentativaQuiz")) or 1))
+
+	-- 1. Cronômetro estrito de 10 minutos (600s) da Área de Recompensas (ativo em qualquer modo)
+	local rewardEndTimestamp = localPlayer:GetAttribute("RewardAreaEndTimestamp")
+	local showRewardTimer = false
+	if typeof(rewardEndTimestamp) == "number" and rewardEndTimestamp > 0 then
+		local rewardRemaining = math.max(0, rewardEndTimestamp - nowServer)
+		if rewardRemaining > 0 or playerState == PLAYER_STATES.IN_REWARD_AREA then
+			showRewardTimer = true
+			rewardTimerCard.CaptionLabel.Text = if playerState == PLAYER_STATES.IN_REWARD_AREA
+				then "ÁREA DE RECOMPENSAS"
+				else "TEMPO DE RECOMPENSAS"
+
+			local formattedReward = formatRemainingClock(rewardRemaining)
+			if formattedReward ~= lastDisplayedRewardTime then
+				lastDisplayedRewardTime = formattedReward
+				rewardTimerCard.TimeLabel.Text = formattedReward
+			end
+			applyTimerSemanticColors(rewardTimerCard, rewardRemaining, false)
+		end
+	end
+	if rewardTimerCard.Root.Visible ~= showRewardTimer then
+		rewardTimerCard.Root.Visible = showRewardTimer
+		if not showRewardTimer then
+			lastDisplayedRewardTime = ""
+		end
+	end
+
+	-- 2. Cronômetro total de 10 minutos (600s) das Questões (validação autoritativa no servidor)
+	local showQuizTimer = timedMode == true and playerState ~= PLAYER_STATES.IN_REWARD_AREA
+	if quizTimerCard.Root.Visible ~= showQuizTimer then
+		quizTimerCard.Root.Visible = showQuizTimer
+		if not showQuizTimer then
+			lastDisplayedQuizTime = ""
+		end
+	end
+
+	if showQuizTimer then
+		local frozenRemaining = localPlayer:GetAttribute("TempoRestanteCongeladoQuiz")
+		local attemptEndTimestamp = localPlayer:GetAttribute("FimTentativaQuiz")
+
+		if typeof(frozenRemaining) == "number" then
+			local formattedFrozen = formatRemainingClock(frozenRemaining)
+			if formattedFrozen ~= lastDisplayedQuizTime then
+				lastDisplayedQuizTime = formattedFrozen
+				quizTimerCard.TimeLabel.Text = formattedFrozen
+			end
+			applyTimerSemanticColors(quizTimerCard, frozenRemaining, currentScore >= QuizConfig.REWARD_MIN_SCORE)
+		elseif currentPhase == "Ativa" and typeof(attemptEndTimestamp) == "number" and attemptEndTimestamp > 0 then
+			local quizRemaining = math.max(0, attemptEndTimestamp - nowServer)
+			local formattedQuiz = formatRemainingClock(quizRemaining)
+			if formattedQuiz ~= lastDisplayedQuizTime then
+				lastDisplayedQuizTime = formattedQuiz
+				quizTimerCard.TimeLabel.Text = formattedQuiz
+			end
+			applyTimerSemanticColors(quizTimerCard, quizRemaining, false)
+		else
+			local defaultClock = formatRemainingClock(QuizConfig.ROUND_DURATION_SECONDS)
+			if defaultClock ~= lastDisplayedQuizTime then
+				lastDisplayedQuizTime = defaultClock
+				quizTimerCard.TimeLabel.Text = defaultClock
+			end
+			quizTimerCard.TimeLabel.TextColor3 = COLOR_TEXT_SECONDARY
+			quizTimerCard.Stroke.Color = COLOR_BORDER_SUBTLE
+		end
+	end
+
+	-- 3. Linha discreta de status contextual
+	if playerState == PLAYER_STATES.IN_REWARD_AREA then
+		setStatusLine("Aproveite a Área de Recompensas · Retorno automático ao zerar", COLOR_TEXT_SECONDARY)
+	elseif timedMode == nil or playerState == PLAYER_STATES.SELECTING_MODE then
+		setStatusLine("Selecione um modo para iniciar", COLOR_TEXT_SECONDARY)
+	elseif playerState == PLAYER_STATES.IN_TUTORIAL or currentPhase ~= "Ativa" then
+		setStatusLine("Conclua o tutorial obrigatório à frente para liberar o saguão", COLOR_TEXT_SECONDARY)
+	elseif localPlayer:GetAttribute("QuizTimeClosed") == true then
+		setStatusLine(
+			string.format("Questões encerradas (%d/%d acertos) · Área de Recompensas liberada", currentScore, QuizConfig.MAX_SCORE),
+			COLOR_ACCENT_SUCCESS_BORDER
+		)
+	elseif currentScore >= QuizConfig.REWARD_MIN_SCORE then
+		setStatusLine(
+			string.format("Tentativa %d · %d/%d acertos · Área de Recompensas liberada", attemptNumber, currentScore, QuizConfig.MAX_SCORE),
+			COLOR_ACCENT_SUCCESS_BORDER
+		)
+	elseif timedMode == false then
+		setStatusLine(
+			string.format("Modo Livre · Tentativa %d · Acertos: %d/%d (mín. %d)", attemptNumber, currentScore, QuizConfig.MAX_SCORE, QuizConfig.REWARD_MIN_SCORE),
+			COLOR_TEXT_SECONDARY
+		)
+	else
+		setStatusLine(
+			string.format("Tentativa %d · Acertos: %d/%d (mín. %d)", attemptNumber, currentScore, QuizConfig.MAX_SCORE, QuizConfig.REWARD_MIN_SCORE),
+			COLOR_TEXT_SECONDARY
+		)
 	end
 end
 
@@ -1061,78 +1327,18 @@ local function applyRoundStateSnapshot(snapshot: RoundStateSnapshot)
 		then snapshot.Fase
 		else (if snapshot.Ativa then "Ativa" else "Tutorial")
 
-	updateModeHudControls()
-
-	local timedMode = localPlayer:GetAttribute("ModoComCronometro")
-	if timedMode ~= true then
-		return
-	end
-	if renderApprovedFrozenTimer() then
-		return
-	end
-
-	if currentPhase == "Ativa" then
-		local attempt = math.max(1, tonumber(localPlayer:GetAttribute("NumeroTentativaQuiz")) or 1)
-		statusLabel.Text = string.format("Tentativa %d", attempt)
-		statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
-	else
-		timerLabel.Text = "--:--.---"
-		timerLabel.TextColor3 = COLOR_TEXT_PRIMARY
-		statusLabel.Text = "Conclua o tutorial para iniciar"
-		statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
-	end
+	updateModeButtonText()
+	updateAllTimersAndStatusHud()
 end
 
-local function updateRewardAreaCountdownHud(nowServer: number)
-	local rewardEndTimestamp = localPlayer:GetAttribute("RewardAreaEndTimestamp")
-	local playerState = localPlayer:GetAttribute("PlayerState")
-
-	if typeof(rewardEndTimestamp) ~= "number" or rewardEndTimestamp <= 0 then
-		if rewardHudPanel.Visible then
-			rewardHudPanel.Visible = false
-			lastRewardTimerText = ""
-		end
-		return
-	end
-
-	local remainingSeconds = math.max(0, rewardEndTimestamp - nowServer)
-	if remainingSeconds <= 0 and playerState ~= PLAYER_STATES.IN_REWARD_AREA then
-		rewardHudPanel.Visible = false
-		return
-	end
-
-	if not rewardHudPanel.Visible then
-		rewardHudPanel.Visible = true
-	end
-
-	rewardHudCaption.Text = if playerState == PLAYER_STATES.IN_REWARD_AREA
-		then "ÁREA DE RECOMPENSAS"
-		else "TEMPO DE RECOMPENSAS"
-
-	local formattedMMSS = formatTimeMinutesSeconds(remainingSeconds)
-	if formattedMMSS ~= lastRewardTimerText then
-		lastRewardTimerText = formattedMMSS
-		rewardHudTimerLabel.Text = formattedMMSS
-	end
-
-	if remainingSeconds <= REWARD_CRITICAL_THRESHOLD_SECONDS then
-		rewardHudTimerLabel.TextColor3 = COLOR_ACCENT_DANGER_BORDER
-		rewardHudStroke.Color = COLOR_ACCENT_DANGER_BORDER
-	elseif remainingSeconds <= REWARD_WARNING_THRESHOLD_SECONDS then
-		rewardHudTimerLabel.TextColor3 = COLOR_ACCENT_WARNING
-		rewardHudStroke.Color = COLOR_ACCENT_WARNING
-	else
-		rewardHudTimerLabel.TextColor3 = COLOR_TEXT_PRIMARY
-		rewardHudStroke.Color = COLOR_BORDER_SUBTLE
-	end
-end
+-- Atualização direta por RenderStepped com relógio sincronizado do servidor (zero lag de interpolação)
+trackConnection(RunService.RenderStepped:Connect(updateAllTimersAndStatusHud))
 
 -- ============================================================================
 -- SINCRONIZAÇÃO DE PORTAS E ESCUDOS DE CORREDOR (RESPEITANDO COLLISION GROUPS)
 -- ============================================================================
 
 local function applyDoorVisualAndLocalCollision(doorName: string, isOpen: boolean)
-	-- Portão de Recompensas e Barreira do Tutorial são governados exclusivamente por CollisionGroups no servidor
 	if doorName == QuizConfig.REWARD_GATE_NAME then
 		return
 	end
@@ -1203,11 +1409,8 @@ end
 
 local function observeDoorBarriersFolder(folder: Instance)
 	trackConnection(folder.ChildAdded:Connect(function(child: Instance)
-		if child:IsA("BasePart") then
-			local targetDoorName = child:GetAttribute("TargetDoorName")
-			if typeof(targetDoorName) == "string" then
-				syncAllLocalDoors()
-			end
+		if child:IsA("BasePart") and typeof(child:GetAttribute("TargetDoorName")) == "string" then
+			syncAllLocalDoors()
 		end
 	end))
 end
@@ -1305,6 +1508,7 @@ local function createRewardArrowIndicator()
 	bannerTitle.Text = "ÁREA DE RECOMPENSAS LIBERADA"
 	bannerTitle.TextColor3 = COLOR_TEXT_PRIMARY
 	bannerTitle.TextSize = 13
+	bannerTitle.TextWrapped = true
 	bannerTitle.Parent = banner
 
 	local bannerSubtitle = Instance.new("TextLabel")
@@ -1315,6 +1519,7 @@ local function createRewardArrowIndicator()
 	bannerSubtitle.Text = "Atravesse o portal à frente (limite de 10 min)"
 	bannerSubtitle.TextColor3 = COLOR_TEXT_SECONDARY
 	bannerSubtitle.TextSize = 12
+	bannerSubtitle.TextWrapped = true
 	bannerSubtitle.Parent = banner
 
 	model.PrimaryPart = shaft
@@ -1354,15 +1559,19 @@ end
 
 trackConnection(localPlayer:GetAttributeChangedSignal("AcertosQuiz"):Connect(function()
 	updateRewardArrowVisibility()
-	updateModeHudControls()
+	updateAllTimersAndStatusHud()
 end))
 
 trackConnection(localPlayer:GetAttributeChangedSignal("PlayerState"):Connect(function()
 	updateRewardArrowVisibility()
 	updateModeModalDismissVisibility()
+	updateAllTimersAndStatusHud()
 end))
 
-trackConnection(localPlayer:GetAttributeChangedSignal("ModoComCronometro"):Connect(updateModeHudControls))
+trackConnection(localPlayer:GetAttributeChangedSignal("ModoComCronometro"):Connect(function()
+	updateModeButtonText()
+	updateAllTimersAndStatusHud()
+end))
 
 trackConnection(localPlayer.CharacterAdded:Connect(function()
 	task.wait(0.2)
@@ -1374,10 +1583,11 @@ trackConnection(ResetarClient.OnClientEvent:Connect(function()
 	closeQuestionModal()
 	syncAllLocalDoors()
 	updateRewardArrowVisibility()
+	updateAllTimersAndStatusHud()
 end))
 
 -- ============================================================================
--- FLUXO DE ABERTURA E RESPOSTA DE QUESTÕES
+-- FLUXO DE ABERTURA E RESPOSTA DE QUESTÕES (LAYOUT AUTOAJUSTÁVEL SEM OVERFLOW)
 -- ============================================================================
 
 trackConnection(AbrirQuiz.OnClientEvent:Connect(function(payload: QuizPromptPayload)
@@ -1400,34 +1610,44 @@ trackConnection(AbrirQuiz.OnClientEvent:Connect(function(payload: QuizPromptPayl
 		local choiceText = choices[index]
 		local hasChoice = typeof(choiceText) == "string"
 		button.Visible = hasChoice
-		button.Text = if hasChoice then choiceText else ""
 		button.BackgroundTransparency = 1
-		button.TextTransparency = 1
+		local innerLabel = answerTextLabels[index]
+		if innerLabel then
+			innerLabel.Text = if hasChoice then choiceText else ""
+			innerLabel.TextTransparency = 1
+		end
 	end
 
 	pcall(function()
 		soundQuestionOpen:Play()
 	end)
 
-	questionFrameScale.Scale = 0.96
+	questionFrameScale.Scale = 1
 	questionTextLabel.TextTransparency = 1
 	questionFrame.Visible = true
 
+	-- Aguarda cálculo de AutomaticSize.Y do motor de layout antes de ajustar escala de cabimento na tela
+	RunService.RenderStepped:Wait()
+	if not questionFrame.Visible then
+		return
+	end
+
+	local targetScale = computeFittedScaleForModal(questionFrame, questionFrameScale, 88)
+	questionFrameScale.Scale = targetScale * 0.96
+
 	local openInfo = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-	TweenService:Create(questionFrameScale, openInfo, { Scale = 1 }):Play()
+	TweenService:Create(questionFrameScale, openInfo, { Scale = targetScale }):Play()
 	TweenService:Create(questionTextLabel, openInfo, { TextTransparency = 0 }):Play()
 
 	for index, button in ipairs(answerButtons) do
 		if button.Visible then
-			local targetY = 164 + (index - 1) * 76
-			button.Position = UDim2.new(0.5, 0, 0, targetY + 8)
-			task.delay(0.04 * index, function()
+			local innerLabel = answerTextLabels[index]
+			task.delay(0.035 * index, function()
 				if questionFrame.Visible then
-					TweenService:Create(button, openInfo, {
-						Position = UDim2.new(0.5, 0, 0, targetY),
-						BackgroundTransparency = 0,
-						TextTransparency = 0,
-					}):Play()
+					TweenService:Create(button, openInfo, { BackgroundTransparency = 0 }):Play()
+					if innerLabel then
+						TweenService:Create(innerLabel, openInfo, { TextTransparency = 0 }):Play()
+					end
 				end
 			end)
 		end
@@ -1500,91 +1720,12 @@ for index, button in ipairs(answerButtons) do
 	end))
 end
 
--- ============================================================================
--- ATUALIZAÇÃO CONTÍNUA DOS TEMPORIZADORES (QUIZ E ÁREA DE RECOMPENSAS)
--- ============================================================================
-
 trackConnection(FimDeRodada.OnClientEvent:Connect(function(payload: RoundEndPayload)
 	closeQuestionModal()
-	if localPlayer:GetAttribute("ModoComCronometro") == false then
-		updateModeHudControls()
-		return
+	if typeof(payload) == "table" and typeof(payload.Mensagem) == "string" then
+		setStatusLine(payload.Mensagem, COLOR_ACCENT_WARNING)
 	end
-	if renderApprovedFrozenTimer() then
-		return
-	end
-	lastStatusCountdownText = ""
-	timerLabel.Text = "00:00.000"
-	timerLabel.TextColor3 = COLOR_ACCENT_DANGER_BORDER
-	statusLabel.Text = if typeof(payload) == "table" and typeof(payload.Mensagem) == "string"
-		then payload.Mensagem
-		else "Tempo da tentativa esgotado."
-	statusLabel.TextColor3 = COLOR_ACCENT_WARNING
-end))
-
-trackConnection(RunService.Heartbeat:Connect(function()
-	local nowServer = Workspace:GetServerTimeNow()
-	updateRewardAreaCountdownHud(nowServer)
-
-	local timedMode = localPlayer:GetAttribute("ModoComCronometro")
-	if timedMode ~= true then
-		if timerLabel.Visible then
-			timerLabel.Visible = false
-		end
-		return
-	end
-	if not timerLabel.Visible then
-		timerLabel.Visible = true
-	end
-	if currentPhase ~= "Ativa" then
-		return
-	end
-	if renderApprovedFrozenTimer() then
-		return
-	end
-
-	local startTimestamp = localPlayer:GetAttribute("InicioTentativaQuiz")
-	local completionTime = localPlayer:GetAttribute("TempoConclusaoQuiz")
-	if typeof(completionTime) == "number" then
-		local formatted = formatTimeMillis(completionTime)
-		if formatted ~= lastAttemptStopwatchText then
-			lastAttemptStopwatchText = formatted
-			timerLabel.Text = formatted
-			timerLabel.TextColor3 = COLOR_TEXT_PRIMARY
-		end
-	elseif typeof(startTimestamp) == "number" then
-		local formatted = formatTimeMillis(nowServer - startTimestamp)
-		if formatted ~= lastAttemptStopwatchText then
-			lastAttemptStopwatchText = formatted
-			timerLabel.Text = formatted
-			timerLabel.TextColor3 = COLOR_TEXT_PRIMARY
-		end
-	else
-		timerLabel.Text = "--:--.---"
-	end
-
-	local endTimestamp = localPlayer:GetAttribute("FimTentativaQuiz")
-	if typeof(endTimestamp) ~= "number" or endTimestamp <= 0 then
-		return
-	end
-
-	local remainingSeconds = math.max(0, endTimestamp - nowServer)
-	local attempt = math.max(1, tonumber(localPlayer:GetAttribute("NumeroTentativaQuiz")) or 1)
-	local statusText = string.format(
-		"Tentativa %d · Restam %s",
-		attempt,
-		formatTimeMinutesSeconds(remainingSeconds)
-	)
-	if statusText ~= lastStatusCountdownText then
-		lastStatusCountdownText = statusText
-		statusLabel.Text = statusText
-	end
-
-	if remainingSeconds <= QUIZ_WARNING_THRESHOLD_SECONDS then
-		statusLabel.TextColor3 = COLOR_ACCENT_WARNING
-	else
-		statusLabel.TextColor3 = COLOR_TEXT_SECONDARY
-	end
+	updateAllTimersAndStatusHud()
 end))
 
 -- ============================================================================
@@ -1622,8 +1763,6 @@ end)
 
 trackConnection(SincronizarRodada.OnClientEvent:Connect(function(snapshot: RoundStateSnapshot)
 	if typeof(snapshot) == "table" then
-		lastStatusCountdownText = ""
-		lastAttemptStopwatchText = ""
 		applyRoundStateSnapshot(snapshot)
 	end
 end))
@@ -1640,7 +1779,9 @@ trackConnection(script.Destroying:Connect(function()
 	table.clear(activeConnections)
 end))
 
-updateModeHudControls()
+updateModeButtonText()
+updateAllTimersAndStatusHud()
+
 task.defer(function()
 	syncAllLocalDoors()
 	updateRewardArrowVisibility()
