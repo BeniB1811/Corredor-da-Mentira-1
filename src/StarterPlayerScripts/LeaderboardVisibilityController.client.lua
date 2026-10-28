@@ -1,118 +1,132 @@
 --!strict
--- A placa e a moldura são ocultadas apenas para este cliente quando uma parede
--- bloqueia a linha de visão. A SurfaceGui mantém MaxDistance = 0 para renderizar
--- em qualquer distância; AlwaysOnTop = false preserva a oclusão visual normal.
+-- Controlador local de oclusão visual do painel de Ranking Global.
+-- Oculta localmente a placa e a moldura quando paredes bloqueiam a linha de visão da câmera.
+
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
-local player = Players.LocalPlayer
-local NOME_PLACAR = "LeaderboardParede"
-local NOME_MOLDURA = "LeaderboardPhysicalFrame"
-local INTERVALO_ATUALIZACAO = 0.15
+local QuizConfig = require(ReplicatedStorage:WaitForChild("QuizConfig"))
 
-local placarEmCache: BasePart? = nil
-local molduraEmCache: Model? = nil
+local BOARD_PART_NAME = QuizConfig.LEADERBOARD_BOARD_NAME
+local PHYSICAL_FRAME_NAME = "LeaderboardPhysicalFrame"
+local VISIBILITY_UPDATE_INTERVAL_SECONDS = 0.15
+local MIN_UNOBSTRUCTED_RAYS = 3
 
-local function obterPlacar(): BasePart?
-	if placarEmCache and placarEmCache:IsDescendantOf(Workspace) then
-		return placarEmCache
+local localPlayer = Players.LocalPlayer
+local cachedBoardPart: BasePart? = nil
+local cachedFrameModel: Model? = nil
+
+local function resolveBoardPart(): BasePart?
+	if cachedBoardPart and cachedBoardPart:IsDescendantOf(Workspace) then
+		return cachedBoardPart
 	end
-	-- O serviço do placar preserva uma peça existente, mesmo que esteja dentro de um Model.
-	local encontrado = Workspace:FindFirstChild(NOME_PLACAR, true)
-	if encontrado and encontrado:IsA("BasePart") then
-		placarEmCache = encontrado
-		return encontrado
+	local found = Workspace:FindFirstChild(BOARD_PART_NAME, true)
+	if found and found:IsA("BasePart") then
+		cachedBoardPart = found
+		return found
 	end
-	placarEmCache = nil
+	cachedBoardPart = nil
 	return nil
 end
 
-local function obterMoldura(): Model?
-	if molduraEmCache and molduraEmCache:IsDescendantOf(Workspace) then
-		return molduraEmCache
+local function resolveFrameModel(): Model?
+	if cachedFrameModel and cachedFrameModel:IsDescendantOf(Workspace) then
+		return cachedFrameModel
 	end
-	local encontrada = Workspace:FindFirstChild(NOME_MOLDURA, true)
-	if encontrada and encontrada:IsA("Model") then
-		molduraEmCache = encontrada
-		return encontrada
+	local found = Workspace:FindFirstChild(PHYSICAL_FRAME_NAME, true)
+	if found and found:IsA("Model") then
+		cachedFrameModel = found
+		return found
 	end
-	molduraEmCache = nil
+	cachedFrameModel = nil
 	return nil
 end
 
-local function temLinhaDeVisao(camera: Camera, placar: BasePart, moldura: Model?, personagem: Model?): boolean
-	local origem = camera.CFrame.Position
-	-- A SurfaceGui usa Face = Front, cuja normal é o LookVector (-Z local).
-	-- Testar o vetor invertido escondia o painel para quem estava no lado correto.
-	local normalFrontal = placar.CFrame.LookVector
-	if normalFrontal:Dot(origem - placar.Position) <= 0 then
+local function hasLineOfSight(
+	camera: Camera,
+	boardPart: BasePart,
+	frameModel: Model?,
+	character: Model?
+): boolean
+	local cameraOrigin = camera.CFrame.Position
+	local frontNormal = boardPart.CFrame.LookVector
+	if frontNormal:Dot(cameraOrigin - boardPart.Position) <= 0 then
 		return false
 	end
 
-	local parametros = RaycastParams.new()
-	parametros.FilterType = Enum.RaycastFilterType.Exclude
-	local ignorar: { Instance } = { placar }
-	if moldura then
-		table.insert(ignorar, moldura)
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	local excludedInstances: { Instance } = { boardPart }
+	if frameModel then
+		table.insert(excludedInstances, frameModel)
 	end
-	if personagem then
-		table.insert(ignorar, personagem)
+	if character then
+		table.insert(excludedInstances, character)
 	end
-	parametros.FilterDescendantsInstances = ignorar
-	parametros.IgnoreWater = true
+	raycastParams.FilterDescendantsInstances = excludedInstances
+	raycastParams.IgnoreWater = true
 
-	local meiaLargura = placar.Size.X * 0.38
-	local meiaAltura = placar.Size.Y * 0.38
-	local pontosLocais = {
-		Vector3.new(0, 0, -placar.Size.Z * 0.5 - 0.05),
-		Vector3.new(-meiaLargura, meiaAltura, -placar.Size.Z * 0.5 - 0.05),
-		Vector3.new(meiaLargura, meiaAltura, -placar.Size.Z * 0.5 - 0.05),
-		Vector3.new(-meiaLargura, -meiaAltura, -placar.Size.Z * 0.5 - 0.05),
-		Vector3.new(meiaLargura, -meiaAltura, -placar.Size.Z * 0.5 - 0.05),
+	local halfWidth = boardPart.Size.X * 0.38
+	local halfHeight = boardPart.Size.Y * 0.38
+	local frontDepth = -boardPart.Size.Z * 0.5 - 0.05
+	local sampleOffsets: { Vector3 } = {
+		Vector3.new(0, 0, frontDepth),
+		Vector3.new(-halfWidth, halfHeight, frontDepth),
+		Vector3.new(halfWidth, halfHeight, frontDepth),
+		Vector3.new(-halfWidth, -halfHeight, frontDepth),
+		Vector3.new(halfWidth, -halfHeight, frontDepth),
 	}
-	local raiosLivres = 0
-	for _, pontoLocal in ipairs(pontosLocais) do
-		local alvo = placar.CFrame:PointToWorldSpace(pontoLocal)
-		if not Workspace:Raycast(origem, alvo - origem, parametros) then
-			raiosLivres += 1
+
+	local clearRays = 0
+	for _, localPoint in ipairs(sampleOffsets) do
+		local worldTarget = boardPart.CFrame:PointToWorldSpace(localPoint)
+		if not Workspace:Raycast(cameraOrigin, worldTarget - cameraOrigin, raycastParams) then
+			clearRays += 1
 		end
 	end
-	return raiosLivres >= 3
+	return clearRays >= MIN_UNOBSTRUCTED_RAYS
 end
 
-local acumulado = 0
-local function atualizarVisibilidade()
-	local placar = obterPlacar()
-	local moldura = obterMoldura()
+local function refreshBoardVisibility()
+	local boardPart = resolveBoardPart()
+	local frameModel = resolveFrameModel()
 	local camera = Workspace.CurrentCamera
-	local personagem = player.Character
-	local visivel = placar ~= nil
-		and camera ~= nil
-		and temLinhaDeVisao(camera :: Camera, placar :: BasePart, moldura, personagem)
+	local character = localPlayer.Character
 
-	if placar then
-		placar.LocalTransparencyModifier = visivel and 0 or 1
-		local surface = placar:FindFirstChild("LeaderboardSurfaceGui")
-		if surface and surface:IsA("SurfaceGui") then
-			surface.Enabled = visivel
+	local isVisible = boardPart ~= nil
+		and camera ~= nil
+		and hasLineOfSight(camera :: Camera, boardPart :: BasePart, frameModel, character)
+
+	if boardPart then
+		boardPart.LocalTransparencyModifier = if isVisible then 0 else 1
+		local surfaceGui = boardPart:FindFirstChild("LeaderboardSurfaceGui")
+		if surfaceGui and surfaceGui:IsA("SurfaceGui") then
+			surfaceGui.Enabled = isVisible
 		end
 	end
 
-	if moldura then
-		for _, descendente in ipairs(moldura:GetDescendants()) do
-			if descendente:IsA("BasePart") then
-				descendente.LocalTransparencyModifier = visivel and 0 or 1
+	if frameModel then
+		for _, descendant in ipairs(frameModel:GetDescendants()) do
+			if descendant:IsA("BasePart") then
+				descendant.LocalTransparencyModifier = if isVisible then 0 else 1
 			end
 		end
 	end
 end
 
-atualizarVisibilidade()
-RunService.Heartbeat:Connect(function(deltaTime)
-	acumulado += deltaTime
-	if acumulado >= INTERVALO_ATUALIZACAO then
-		acumulado %= INTERVALO_ATUALIZACAO
-		atualizarVisibilidade()
+local accumulatedDelta = 0
+refreshBoardVisibility()
+
+local heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime: number)
+	accumulatedDelta += deltaTime
+	if accumulatedDelta >= VISIBILITY_UPDATE_INTERVAL_SECONDS then
+		accumulatedDelta %= VISIBILITY_UPDATE_INTERVAL_SECONDS
+		refreshBoardVisibility()
 	end
+end)
+
+script.Destroying:Connect(function()
+	heartbeatConnection:Disconnect()
 end)

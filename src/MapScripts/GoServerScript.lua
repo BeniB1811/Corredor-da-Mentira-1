@@ -1,30 +1,50 @@
--- Compatibilidade do botão de controle do veículo Lamborghini.
--- Mantém a interface local que já acompanha o modelo e remove a atualização remota via InsertService:LoadAsset,
--- que substituía código do jogo dinamicamente ao iniciar a experiência.
-local part = script.Parent
-local clickDetector = part:FindFirstChild("CD")
-local guiTemplate = script:FindFirstChild("GoPlayer")
+--!strict
+-- Compatibilidade segura do botão de controle de veículo na Área de Recompensas.
+-- Preserva a interface local do modelo e elimina carregamento remoto dinâmico (InsertService).
 
-if guiTemplate and guiTemplate:FindFirstChild("GoPlayer") then
-	guiTemplate.GoPlayer.Value = part
+local DISTANCE_TOLERANCE_STUDS = 4
+
+local parentInstance = script.Parent
+if not parentInstance or not parentInstance:IsA("BasePart") then
+	return
 end
 
-local sound = Instance.new("Sound")
-sound.Parent = part
-sound.PlaybackSpeed = 1
-sound.Volume = 0.5
-sound.Looped = true
+local buttonPart = parentInstance :: BasePart
+local clickDetector = buttonPart:FindFirstChild("CD")
+local guiTemplate = script:FindFirstChild("GoPlayer")
+
+if guiTemplate then
+	local targetReference = guiTemplate:FindFirstChild("GoPlayer")
+	if targetReference and targetReference:IsA("ObjectValue") then
+		targetReference.Value = buttonPart
+	end
+end
+
+local engineSound = buttonPart:FindFirstChildOfClass("Sound") or Instance.new("Sound")
+engineSound.PlaybackSpeed = 1
+engineSound.Volume = 0.5
+engineSound.Looped = true
+engineSound.Parent = buttonPart
 
 if clickDetector and clickDetector:IsA("ClickDetector") then
-	clickDetector.MouseClick:Connect(function(player)
+	local detector = clickDetector :: ClickDetector
+	local clickConnection = detector.MouseClick:Connect(function(player: Player)
 		local character = player.Character
-		local root = character and character:FindFirstChild("HumanoidRootPart")
-		local distanciaMaxima = clickDetector.MaxActivationDistance + 4
-		if not root or (root.Position - part.Position).Magnitude > distanciaMaxima then
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if not rootPart or not rootPart:IsA("BasePart") then
 			return
 		end
-		if not player.PlayerGui:FindFirstChild("GoPlayer") and guiTemplate then
-			guiTemplate:Clone().Parent = player.PlayerGui
+		local maxDistance = detector.MaxActivationDistance + DISTANCE_TOLERANCE_STUDS
+		if (rootPart.Position - buttonPart.Position).Magnitude > maxDistance then
+			return
 		end
+		local playerGui = player:FindFirstChildOfClass("PlayerGui")
+		if playerGui and not playerGui:FindFirstChild("GoPlayer") and guiTemplate then
+			guiTemplate:Clone().Parent = playerGui
+		end
+	end)
+
+	script.Destroying:Connect(function()
+		clickConnection:Disconnect()
 	end)
 end
